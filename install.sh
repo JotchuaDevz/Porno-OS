@@ -996,6 +996,22 @@ speed_hysteria() {
     pause_return
 }
 
+change_obfs_hysteria() {
+    clear
+    echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+    echo -e "                 ${BOLD}CAMBIAR OBFS DE HYSTERIA${NC}"
+    echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+    current_obfs=$(jq -r '.inbounds[0].obfs' "$HYST_CONFIG" 2>/dev/null || echo "HexTunnel")
+    echo -e " Obfs Actual: ${YELLOW}${current_obfs}${NC}\n"
+    read -rp " Ingresa Nuevo Obfs: " new_obfs
+    if [ -n "$new_obfs" ]; then
+        jq ".inbounds[0].obfs = \"$new_obfs\"" "$HYST_CONFIG" > /tmp/h.json && mv /tmp/h.json "$HYST_CONFIG"
+        systemctl restart hysteria-server
+        echo -e "\n${GREEN}✔ ¡Obfs actualizado exitosamente a: $new_obfs!${NC}"
+    else echo -e "\n${RED}Acción cancelada.${NC}"; fi
+    pause_return
+}
+
 # --- XRAY MANAGEMENT FUNCTIONS ---
 add_xray() {
   clear
@@ -1472,6 +1488,45 @@ change_slowdns() {
     pause_return
 }
 
+change_status() {
+    clear
+    echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+    echo -e "             ${BOLD}CAMBIAR MENSAJE DE STATUS (WS)${NC}"
+    echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+    proxy_file="/etc/socksproxy/proxy.js"
+    if [ ! -f "$proxy_file" ]; then echo -e "${RED}Archivo proxy.js no encontrado.${NC}"; pause_return; return; fi
+    line_num=$(grep -n "clientSocket.write('HTTP/1.1 101" "$proxy_file" | head -n1 | cut -d: -f1)
+    if [ -z "$line_num" ]; then echo -e "${RED}No se encontró la línea de status en proxy.js.${NC}"; pause_return; return; fi
+    current_status=$(sed -n "${line_num}p" "$proxy_file" | sed 's/^[[:space:]]*//')
+    echo -e " Línea Actual:\n ${YELLOW}${current_status}${NC}\n"
+    echo -e " Escribe el mensaje completo, libre: texto plano o HTML"
+    echo -e " (ej: <font color=\"red\">Mi Texto</font> <b>Extra</b>)."
+    echo -e " Nota: no uses comillas simples (') dentro del mensaje.\n"
+    read -rp " Nuevo Mensaje de Status: " new_status
+    if [ -n "$new_status" ]; then
+        esc_msg=$(printf '%s' "$new_status" | sed "s/'/’/g")
+        awk -v ln="$line_num" -v msg="$esc_msg" 'NR==ln{printf "            clientSocket.write(%cHTTP/1.1 101 %s\\r\\n\\r\\n%c);\n", 39, msg, 39; next} {print}' "$proxy_file" > "${proxy_file}.tmp" && mv "${proxy_file}.tmp" "$proxy_file"
+        for u in $(systemctl list-units --all --type=service --no-legend 'ws-proxy@*' 2>/dev/null | awk '{print $1}'); do systemctl restart "$u"; done
+        echo -e "\n${GREEN}✔ Mensaje de status actualizado.${NC}"
+    else echo -e "\n${RED}Acción cancelada.${NC}"; fi
+    pause_return
+}
+
+change_banner() {
+    clear
+    echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+    echo -e "                 ${BOLD}EDITAR BANNER (SSH / STUNNEL)${NC}"
+    echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+    echo -e " Se abrirá el banner en nano para que lo edites a tu gusto."
+    echo -e " Guarda con ${YELLOW}CTRL+O${NC} + ENTER y sal con ${YELLOW}CTRL+X${NC}.\n"
+    read -rp " Presiona ENTER para continuar o escribe 0 para cancelar: " conf
+    if [ "$conf" = "0" ]; then echo -e "\n${RED}Acción cancelada.${NC}"; pause_return; return; fi
+    nano /etc/zorro-luffy
+    systemctl restart ssh stunnel4 2>/dev/null
+    echo -e "\n${GREEN}✔ Banner actualizado y servicios reiniciados.${NC}"
+    pause_return
+}
+
 # --- Advanced / Danger Zone ---
 advanced_menu() {
   while true; do
@@ -1483,6 +1538,8 @@ advanced_menu() {
     echo -e "  [${YELLOW}02${NC}] Ver Logs de Acciones de Servicios (Journalctl)"
     echo -e "  [${YELLOW}03${NC}] Cambiar Dominio/IP del Servidor"
     echo -e "  [${YELLOW}04${NC}] Cambiar Nameserver de SlowDNS (NS)"
+    echo -e "  [${YELLOW}06${NC}] Cambiar Mensaje de Status (WS, HTML/Texto Libre)"
+    echo -e "  [${YELLOW}07${NC}] Editar Banner (SSH / Stunnel)"
     echo -e "  [${RED}05${NC}] Desinstalar Script Completo (Peligro)"
     echo -e "  [${YELLOW}00${NC}] Atrás\n"
     read -rp "  Selecciona una opción: " opt
@@ -1501,6 +1558,8 @@ advanced_menu() {
         esac; pause_return ;;
       3|03) change_domain ;;
       4|04) change_slowdns ;;
+      6|06) change_status ;;
+      7|07) change_banner ;;
       5|05) remove_script ;;
       0|00) break ;;
     esac
@@ -1588,8 +1647,8 @@ while true; do
     3|03)
       while true; do
         clear; echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}\n                   ${BOLD}GESTIÓN DE CUENTAS HYSTERIA${NC}\n${CYAN}══════════════════════════════════════════════════════════════${NC}"
-        echo -e "  [${YELLOW}1${NC}] Agregar Cuenta Hysteria\n  [${YELLOW}2${NC}] Renovar Cuenta Hysteria\n  [${YELLOW}3${NC}] Eliminar Cuenta Hysteria\n  [${YELLOW}4${NC}] Listar Todas Las Cuentas\n  [${YELLOW}5${NC}] Editar Velocidades Subida/Bajada\n  [${YELLOW}0${NC}] Atrás\n"
-        read -rp "  ► Opción: " sub; case "$sub" in 1) add_hysteria;; 2) extend_hysteria;; 3) del_hysteria;; 4) list_hysteria;; 5) speed_hysteria;; 0) break;; esac
+        echo -e "  [${YELLOW}1${NC}] Agregar Cuenta Hysteria\n  [${YELLOW}2${NC}] Renovar Cuenta Hysteria\n  [${YELLOW}3${NC}] Eliminar Cuenta Hysteria\n  [${YELLOW}4${NC}] Listar Todas Las Cuentas\n  [${YELLOW}5${NC}] Editar Velocidades Subida/Bajada\n  [${YELLOW}6${NC}] Cambiar Obfs\n  [${YELLOW}0${NC}] Atrás\n"
+        read -rp "  ► Opción: " sub; case "$sub" in 1) add_hysteria;; 2) extend_hysteria;; 3) del_hysteria;; 4) list_hysteria;; 5) speed_hysteria;; 6) change_obfs_hysteria;; 0) break;; esac
       done ;;
     4|04) online_users ;;
     5|05) service_control_menu ;;
