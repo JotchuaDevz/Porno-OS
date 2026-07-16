@@ -1,7 +1,7 @@
 #!/bin/bash
 set -o pipefail
 
-#by GuruzGH
+#by JotchuaDevz
 clear
 
 # Initializing Server
@@ -63,7 +63,7 @@ WsPort='10080'
 MainPort='666' 
 
 # SSH SlowDNS
-read -p "Ingresa el Nameserver de SlowDNS (o presiona enter para el predeterminado): " -e -i "ns-dl.guruzgh.ovh" Nameserver
+read -p "Ingresa el Nameserver de SlowDNS (o presiona enter para el predeterminado): " -e -i "ns-miami.hexapps.app" Nameserver
 Serverkey='819d82813183e4be3ca1ad74387e47c0c993b81c601b2d1473a3f47731c404ae'
 Serverpub='7fbd1f8aa0abfe15a7903e837f78aba39cf61d36f183bd604daa2fe4ef3b7b59'
 
@@ -152,7 +152,7 @@ ln -fs /usr/share/zoneinfo/$MyVPS_Time /etc/localtime
 
 cat > /root/.profile <<'EOF_PROFILE'
 clear
-echo "Script Por Guruz GH"
+echo "Script Por JotchuaDevz"
 echo "Escribe 'menu' Para Ver Los Comandos"
 EOF_PROFILE
 
@@ -898,7 +898,7 @@ add_hysteria() {
     echo "$new_pass $exp_date" >> "$HYST_USER_DB"
     systemctl restart hysteria-server
     
-    OBFS_VAL=$(jq -r '.inbounds[0].obfs' "$HYST_CONFIG" 2>/dev/null || echo "GuruzScript")
+    OBFS_VAL=$(jq -r '.inbounds[0].obfs' "$HYST_CONFIG" 2>/dev/null || echo "HexTunnel")
     
     echo -e "\n${GREEN}✔ ¡Usuario creado exitosamente!${NC}"
     echo -e "${CYAN}--------------------------------------------------------------${NC}"
@@ -1023,7 +1023,7 @@ add_xray() {
     uuid=$(cat /proc/sys/kernel/random/uuid)
   fi
 
-  pass="Guruz${uuid:0:6}"
+  pass="HexTunnel${uuid:0:6}"
   
   if [ "$prot" == "1" ]; then
     jq ".inbounds[0].settings.clients += [{\"id\": \"$uuid\", \"email\": \"$user\"}]" /etc/xray/config.json > /tmp/x.json && mv /tmp/x.json /etc/xray/config.json
@@ -1372,7 +1372,7 @@ service_control_menu() {
 
 # --- Backup & Restore ---
 backup_snapshot() {
-  clear; local out="/root/guruzgh_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
+  clear; local out="/root/hextunnel_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
   echo -e "Empaquetando configuraciones del servidor..."
   tar -czf "$out" /etc/ssh /etc/stunnel /etc/squid /etc/hysteria /etc/deekayvpn /etc/systemd/system/ws-proxy@.service /etc/xray 2>/dev/null
   echo -e "\n${GREEN}✔ ¡Respaldo creado exitosamente!${NC}\nUbicación: ${YELLOW}$out${NC}"
@@ -1385,7 +1385,7 @@ restore_snapshot() {
   echo -e "                   ${BOLD}RESTAURAR CONFIGURACIÓN${NC}"
   echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
   shopt -s nullglob
-  backups=(/root/guruzgh_backup_*.tar.gz)
+  backups=(/root/hextunnel_backup_*.tar.gz)
   if [ ${#backups[@]} -eq 0 ]; then echo -e "${RED}  No se encontraron archivos de respaldo en /root/.${NC}"; pause_return; return; fi
   echo -e "  Respaldos Disponibles:\n"
   for i in "${!backups[@]}"; do printf "  [${YELLOW}%02d${NC}] %s\n" $((i+1)) "$(basename "${backups[$i]}")"; done
