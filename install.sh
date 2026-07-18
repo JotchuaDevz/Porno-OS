@@ -1751,7 +1751,20 @@ add_hysteria2() {
     fi
     read -rp " Validez (Días): " days
     [[ "$days" =~ ^[0-9]+$ ]] && [ "$days" -gt 0 ] || { echo -e "\n${RED}Validez inválida.${NC}"; pause_return; return; }
-    token=$(cat /proc/sys/kernel/random/uuid)
+
+    read -rp " ¿Usar un token/UUID personalizado (ej. el mismo que ya usas en V2Ray)? (y/N): " custom_token_prompt
+    if [[ "$custom_token_prompt" =~ ^[Yy]$ ]]; then
+        read -rp " Ingresa el token/UUID personalizado: " token
+        if [[ -z "$token" ]] || [[ "$token" =~ [[:space:]] ]]; then
+            echo -e "\n${RED}Token inválido: no puede estar vacío ni contener espacios.${NC}"; pause_return; return
+        fi
+        if awk -v t="$token" '$2 == t {found=1} END {exit !found}' "$HYST2_USER_DB" 2>/dev/null; then
+            echo -e "\n${RED}Ese token ya está en uso por otro usuario de Hysteria 2.${NC}"; pause_return; return
+        fi
+    else
+        token=$(cat /proc/sys/kernel/random/uuid)
+    fi
+
     exp=$(date -d "+${days} days" +%Y-%m-%d)
     printf '%s %s %s\n' "$user" "$token" "$exp" >> "$HYST2_USER_DB"
     chmod 600 "$HYST2_USER_DB"
@@ -2754,13 +2767,13 @@ while true; do
   echo -e "  [${YELLOW}01${NC}] Gestión de Cuentas SSH (Legado)"
   echo -e "  [${YELLOW}02${NC}] Gestión de Cuentas Xray (V2ray)"
   echo -e "  [${YELLOW}03${NC}] Gestión de Cuentas Hysteria (UDP)"
-  echo -e "  [${YELLOW}10${NC}] Gestión de Cuentas Hysteria 2 (UDP)"
-  echo -e "  [${YELLOW}04${NC}] Monitorear Conexiones Activas"
-  echo -e "  [${YELLOW}05${NC}] Control de Servicios (Reiniciar Protocolos)"
-  echo -e "  [${YELLOW}06${NC}] Respaldar y Restaurar Datos"
-  echo -e "  [${YELLOW}07${NC}] Utilidades del Sistema (BBR y Netflix)"
-  echo -e "  [${YELLOW}08${NC}] Configuración Avanzada (Dominio / Nameserver)"
-  echo -e "  [${YELLOW}09${NC}] Reiniciar Servidor"
+  echo -e "  [${YELLOW}04${NC}] Gestión de Cuentas Hysteria 2 (UDP)"
+  echo -e "  [${YELLOW}05${NC}] Monitorear Conexiones Activas"
+  echo -e "  [${YELLOW}06${NC}] Control de Servicios (Reiniciar Protocolos)"
+  echo -e "  [${YELLOW}07${NC}] Respaldar y Restaurar Datos"
+  echo -e "  [${YELLOW}08${NC}] Utilidades del Sistema (BBR y Netflix)"
+  echo -e "  [${YELLOW}09${NC}] Configuración Avanzada (Dominio / Nameserver)"
+  echo -e "  [${YELLOW}10${NC}] Reiniciar Servidor"
   echo -e "  [${RED}00${NC}] Salir\n"
   read -rp "  ► Selecciona una opción: " opt
   case "$opt" in
@@ -2782,20 +2795,20 @@ while true; do
         echo -e "  [${YELLOW}1${NC}] Agregar Cuenta Hysteria\n  [${YELLOW}2${NC}] Renovar Cuenta Hysteria\n  [${YELLOW}3${NC}] Eliminar Cuenta Hysteria\n  [${YELLOW}4${NC}] Listar Todas Las Cuentas\n  [${YELLOW}5${NC}] Editar Velocidades Subida/Bajada\n  [${YELLOW}6${NC}] Cambiar Obfs\n  [${YELLOW}0${NC}] Atrás\n"
         read -rp "  ► Opción: " sub; case "$sub" in 1) add_hysteria;; 2) extend_hysteria;; 3) del_hysteria;; 4) list_hysteria;; 5) speed_hysteria;; 6) change_obfs_hysteria;; 0) break;; esac
       done ;;
-    10)
+    4|04)
       while true; do
         clear; echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}\n                   ${BOLD}GESTIÓN DE CUENTAS HYSTERIA 2${NC}\n${CYAN}══════════════════════════════════════════════════════════════${NC}"
         echo -e "  [${YELLOW}1${NC}] Agregar Cuenta Hysteria 2\n  [${YELLOW}2${NC}] Renovar Cuenta Hysteria 2\n  [${YELLOW}3${NC}] Eliminar Cuenta Hysteria 2\n  [${YELLOW}4${NC}] Listar Todas Las Cuentas\n  [${YELLOW}5${NC}] Mostrar Enlace de Cuenta\n  [${YELLOW}0${NC}] Atrás\n"
         read -rp "  ► Opción: " sub; case "$sub" in 1) add_hysteria2;; 2) extend_hysteria2;; 3) del_hysteria2;; 4) list_hysteria2;; 5) show_hysteria2;; 0) break;; esac
       done ;;
-    4|04) online_users ;;
-    5|05) service_control_menu ;;
-    6|06)
+    5|05) online_users ;;
+    6|06) service_control_menu ;;
+    7|07)
       clear; echo -e "  [1] Respaldar Configuraciones del Sistema\n  [2] Restaurar Desde Respaldo\n  [0] Atrás"
       read -rp " Selecciona: " subopt; case "$subopt" in 1) backup_snapshot;; 2) restore_snapshot;; esac ;;
-    7|07) utilities_menu ;;
-    8|08) advanced_menu ;;
-    9|09) clear; read -rp "¿Reiniciar el servidor ahora? [y/N]: " ans; [[ "$ans" =~ ^[Yy]$ ]] && reboot ;;
+    8|08) utilities_menu ;;
+    9|09) advanced_menu ;;
+    10) clear; read -rp "¿Reiniciar el servidor ahora? [y/N]: " ans; [[ "$ans" =~ ^[Yy]$ ]] && reboot ;;
     0|00) clear; exit 0 ;;
   esac
 done
