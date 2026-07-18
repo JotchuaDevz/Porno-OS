@@ -44,6 +44,15 @@ read -p "Ingresa tu Dominio/Subdominio para Xray (o presiona enter para usar la 
 export DOMAIN
 
 #### BEGIN LET'S ENCRYPT / SELF-SIGNED CERTIFICATE HANDLING ####
+# Bootstrap mínimo: dig (dnsutils) y certbot deben existir ANTES de usarse aquí.
+# El apt-get update/upgrade grande y la lista completa de paquetes vienen más
+# adelante en el script; sin este bootstrap, 'dig' y 'certbot' fallarían en un
+# VPS recién creado que aún no tiene el índice de apt actualizado.
+apt-get update -y >/dev/null 2>&1
+command -v dig >/dev/null 2>&1 || apt-get install -y dnsutils >/dev/null 2>&1
+command -v certbot >/dev/null 2>&1 || apt-get install -y certbot >/dev/null 2>&1
+
+mkdir -p /etc/xray
 if [[ "$DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     USE_LETSENCRYPT=false
     echo "Se usará un certificado autofirmado para la IP $DOMAIN."
@@ -59,19 +68,19 @@ else
         exit 1
     fi
     echo "Dominio verificado. Solicitando certificado Let's Encrypt..."
-    apt-get install -y certbot
     systemctl stop xray 2>/dev/null || true
     systemctl stop nginx 2>/dev/null || true
-    certbot certonly --standalone --non-interactive --agree-tos --email "admin@$DOMAIN" -d "$DOMAIN"
+    if ! certbot certonly --standalone --non-interactive --agree-tos --email "admin@$DOMAIN" -d "$DOMAIN"; then
+        echo "ERROR: No se pudo emitir el certificado Let's Encrypt para $DOMAIN."
+        exit 1
+    fi
     CERT_PATH="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
     KEY_PATH="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
-    mkdir -p /etc/xray
     echo "letsencrypt" > /etc/xray/cert_type
 fi
 
 if [ "$USE_LETSENCRYPT" = false ]; then
     echo "Generando certificado autofirmado para la IP $DOMAIN..."
-    mkdir -p /etc/xray
     openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
       -keyout /etc/xray/xray.key \
       -out /etc/xray/xray.crt \
@@ -83,6 +92,7 @@ else
 fi
 chmod 644 /etc/xray/xray.crt
 chmod 600 /etc/xray/xray.key
+mkdir -p /etc/stunnel
 cat /etc/xray/xray.key /etc/xray/xray.crt > /etc/stunnel/stunnel.pem
 chmod 600 /etc/stunnel/stunnel.pem
 chown root:root /etc/stunnel/stunnel.pem
@@ -437,6 +447,7 @@ chmod 600 /etc/xray/vless.txt
 chmod 600 /etc/xray/server.env
 
 # XRAY CONFIGURATION
+# Xray terminates TLS directly on 443 and dispatches transports by ALPN/path.
 cat <<EOF > /etc/xray/config.json
 {
   "log": { "access": "none", "error": "/var/log/xray/error.log", "loglevel": "error" },
@@ -674,7 +685,129 @@ systemctl disable --now haproxy 2>/dev/null || true
 systemctl enable xray
 systemctl restart xray
 
-# Internal-only HTTP/2 router
+# === LEGACY HAPROXY CONFIGURATION (disabled; Xray owns port 443) ===
+if false; then
+# HAProxy terminates TLS once and dispatches VLESS by HTTP path or ALPN.
+mkdir -p /etc/haproxy/certs
+install -m 600 /etc/stunnel/stunnel.pem /etc/haproxy/certs/xray.pem
+cat <<EOF_HAPROXY > /etc/haproxy/haproxy.cfg
+global
+    log /dev/log local0
+    maxconn 100000
+    daemon
+
+defaults
+    log global
+    mode tcp
+    option dontlognull
+    timeout connect 5s
+    timeout client 1h
+    timeout client-fin 1h
+    timeout server 1h
+    timeout tunnel 1h
+    timeout http-request 15s
+
+frontend public_tls_443
+    bind :443 v4v6 tfo ssl crt /etc/haproxy/certs/xray.pem alpn h2,http/1.1
+    mode tcp
+    acl negotiated_h2 ssl_fc_alpn -i h2
+    acl h2_preface req.payload(0,24) -m bin 505249202a20485454502f322e300d0a0d0a534d0d0a0d0a
+    acl h1_vless_xhttp req.payload(0,500) -m reg /xhttp
+    acl h1_vless_httpupgrade req.payload(0,500) -m reg /httpupgrade
+    acl h1_vless_tcp req.payload(0,500) -m reg /vless-tcp
+    acl h1_vless_ws req.payload(0,500) -m reg /vless
+    acl clear_ssh req.payload(0,4) -m str SSH-
+
+    # Do not accept generic HTTP as soon as its method is visible. Wait until
+    # the complete VLESS path is buffered, otherwise /vless falls through to
+    # the generic SSH WebSocket proxy.
+    tcp-request inspect-delay 5s
+    tcp-request content accept if h2_preface
+    tcp-request content accept if h1_vless_xhttp
+    tcp-request content accept if h1_vless_httpupgrade
+    tcp-request content accept if h1_vless_tcp
+    tcp-request content accept if h1_vless_ws
+    tcp-request content accept if clear_ssh
+
+    use_backend h2_dispatch if negotiated_h2 h2_preface
+
+    # Specific paths must precede the shorter WebSocket path.
+    use_backend vless_xhttp_h1 if h1_vless_xhttp
+    use_backend vless_httpupgrade if h1_vless_httpupgrade
+    use_backend vless_tcp_http if h1_vless_tcp
+    use_backend vless_ws if h1_vless_ws
+
+    use_backend sslh_clear if clear_ssh
+    use_backend sslh_clear if HTTP
+
+    default_backend sslh_clear
+
+backend h2_dispatch
+    server h2_router 127.0.0.1:10444 send-proxy-v2
+
+
+frontend h2_router
+    bind 127.0.0.1:10444 accept-proxy
+    mode http
+
+    # Match specific HTTP/2 transports first.
+    use_backend vless_grpc_h2 if { path_beg /grpc-svc }
+    use_backend vless_xhttp_h2 if { path_beg /xhttp }
+    use_backend vless_httpupgrade if { path_beg /httpupgrade }
+    use_backend vless_ws if { path_beg /vless }
+    default_backend reject_h2
+
+backend vless_tcp_http
+    server xray 127.0.0.1:10007 send-proxy-v2
+
+backend vless_ws
+    mode http
+    server xray 127.0.0.1:10003 send-proxy-v2
+
+backend vless_httpupgrade
+    mode http
+    server xray 127.0.0.1:10005 send-proxy-v2
+
+backend vless_xhttp_h1
+    server xray 127.0.0.1:10004 send-proxy-v2
+
+backend vless_xhttp_h2
+    mode http
+    server xray 127.0.0.1:10004 send-proxy-v2 proto h2
+
+backend vless_grpc_h2
+    mode http
+    server xray 127.0.0.1:10006 send-proxy-v2 proto h2
+
+backend sslh_clear
+    server sslh 127.0.0.1:666
+
+backend reject_h2
+    mode http
+    http-request return status 404
+EOF_HAPROXY
+
+if ! haproxy -c -f /etc/haproxy/haproxy.cfg; then
+  echo "HAProxy configuration validation failed."
+  exit 1
+fi
+
+mkdir -p /etc/systemd/system/haproxy.service.d
+cat <<'EOF_HAPROXY_UNIT' > /etc/systemd/system/haproxy.service.d/xray-order.conf
+[Unit]
+After=xray.service network-online.target
+Wants=xray.service network-online.target
+EOF_HAPROXY_UNIT
+systemctl daemon-reload
+systemctl enable "$HAPROXY_SERVICE"
+systemctl restart "$HAPROXY_SERVICE"
+fi
+
+# Internal-only HTTP/2 router. OBSOLETO: desde que el fallback ALPN "h2" en
+# vless-tls-dispatcher apunta directo a 127.0.0.1:10006, Xray ya no necesita
+# este salto por HAProxy. Se deja deshabilitado para no reactivar un servicio
+# que el script ya apagó (systemctl disable --now haproxy) más arriba.
+if false; then
 cat <<'EOF_H2_ROUTER' > /etc/haproxy/haproxy.cfg
 global
     log /dev/log local0
@@ -723,6 +856,7 @@ EOF_H2_UNIT
 systemctl daemon-reload
 systemctl enable haproxy
 systemctl restart haproxy
+fi
 
 # USER EXPIRY CRONJOB FOR XRAY
 cat <<'EOF_EXP' > /usr/local/bin/exp-check
@@ -740,7 +874,7 @@ work_dir=$(mktemp -d /tmp/xray-exp.XXXXXX) || exit 1
 trap 'rm -rf "$work_dir"' EXIT
 
 mapfile -t expired_users < <(
-  for proto in vless; do
+  for proto in vless vmess trojan; do
     db="/etc/xray/${proto}.txt"
     [ -f "$db" ] && awk -v d="$now" '$3 < d {print $1}' "$db"
   done | sort -u
@@ -769,7 +903,7 @@ if ! systemctl restart xray; then
   exit 1
 fi
 
-for proto in vless; do
+for proto in vless vmess trojan; do
   db="/etc/xray/${proto}.txt"
   [ -f "$db" ] || continue
   awk -v d="$now" '$3 >= d {print}' "$db" > "$work_dir/${proto}.txt" || exit 1
@@ -788,14 +922,18 @@ CONFIG="/etc/hysteria/config.json"
 changed=0
 
 if [ -f "$USER_DB" ]; then
+  # Read expired users into an array securely to avoid modifying the file while reading it
   mapfile -t expired_users < <(awk -v d="$now" '$2 < d {print $1}' "$USER_DB")
   
   for user in "${expired_users[@]}"; do
+    # Remove from JSON config
     jq ".inbounds[0].users |= map(select(.auth_str != \"$user\"))" "$CONFIG" > /tmp/h.json && mv /tmp/h.json "$CONFIG"
+    # Remove from TXT DB
     sed -i "/^$user /d" "$USER_DB"
     changed=1
   done
   
+  # Only restart the UDP core if an account was actually scrubbed
   if [ "$changed" -eq 1 ]; then
     systemctl restart hysteria-server
   fi
@@ -899,11 +1037,17 @@ echo "0 3 * * * root sync; echo 3 > /proc/sys/vm/drop_caches" > /etc/cron.d/drop
 # ==========================================
 # AGGRESSIVE SYSTEM & CONNTRACK TUNING
 # ==========================================
+# Force load nf_conntrack module
 modprobe nf_conntrack 2>/dev/null || true; echo "nf_conntrack" > /etc/modules-load.d/freenet.conf
 cat <<'SYSCTL' > /etc/sysctl.d/99-freenet-tuning.conf
+# File Descriptors
 fs.file-max = 1048576
+
+# Network Core
 net.core.somaxconn = 65535
 net.core.netdev_max_backlog = 16384
+
+# TCP Settings
 net.ipv4.ip_local_port_range = 1024 65000
 net.ipv4.tcp_max_syn_backlog = 8192
 net.ipv4.tcp_fin_timeout = 15
@@ -911,8 +1055,12 @@ net.ipv4.tcp_tw_reuse = 1
 net.ipv4.tcp_keepalive_time = 600
 net.ipv4.tcp_keepalive_intvl = 60
 net.ipv4.tcp_keepalive_probes = 10
+
+# SOCKS / WARP Local Loopback Optimization
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_mtu_probing = 1
+
+# Connection Tracking Limits (Prevents silent drops)
 net.netfilter.nf_conntrack_max = 2097152
 net.netfilter.nf_conntrack_tcp_timeout_established = 1200
 net.netfilter.nf_conntrack_udp_timeout = 60
@@ -955,8 +1103,10 @@ WantedBy=multi-user.target
 END
 systemctl daemon-reload; systemctl enable server-sldns; systemctl restart server-sldns
 
-# === SLIPSTREAM (OPCIONAL) ===
+# === SLIPSTREAM (segundo túnel DNS) + DANTE SOCKS + DNSDIST (multiplexor en :53) — OPCIONAL ===
 if [ "$InstallSlipstream" = "y" ]; then
+
+# Dante SOCKS: backend genérico al que Slipstream reenvía el tráfico ya desencriptado
 command -v danted >/dev/null 2>&1 || apt-get install -y dante-server
 EXT_IP="$(ip -4 addr show scope global 2>/dev/null | awk '/inet/{print $2}' | cut -d/ -f1 | head -1)"
 [ -z "$EXT_IP" ] && EXT_IP="$(curl -s --max-time 5 ifconfig.me 2>/dev/null)"
@@ -982,6 +1132,7 @@ socks pass {
 DANTE_EOF
 systemctl restart danted; systemctl enable danted >/dev/null 2>&1
 
+# Rust (necesario para compilar slipstream-server)
 if ! command -v cargo &>/dev/null; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y >/dev/null 2>&1
   source "$HOME/.cargo/env"
@@ -989,6 +1140,7 @@ else
   source "$HOME/.cargo/env" 2>/dev/null || true
 fi
 
+# Clonar y compilar slipstream-server (commit fijado)
 if [ -d "$SlipstreamInstallDir/.git" ]; then
   cd "$SlipstreamInstallDir"
 else
@@ -1002,6 +1154,7 @@ git submodule update --init --recursive --quiet
 cargo build --release -p slipstream-server --quiet 2>&1
 cd /root
 
+# Servicio systemd de Slipstream, reenviando a Dante SOCKS en vez de SSH directo
 cat > /etc/systemd/system/slipstream.service <<SLIPSTREAM_EOF
 [Unit]
 Description=Slipstream DNS Tunnel Server
@@ -1026,6 +1179,7 @@ WantedBy=multi-user.target
 SLIPSTREAM_EOF
 systemctl daemon-reload; systemctl enable slipstream >/dev/null 2>&1; systemctl restart slipstream
 
+# dnsdist: multiplexor público en :53, reenvía por dominio hacia SlowDNS y Slipstream
 command -v dnsdist >/dev/null 2>&1 || apt-get install -y dnsdist
 mkdir -p "$(dirname "$DnsdistConf")"
 cat > "$DnsdistConf" <<DNSDIST_EOF
@@ -1043,9 +1197,12 @@ setPoolServers("slipstream_pool", {getServer(1)})
 addAction(AllRule(), DropAction())
 DNSDIST_EOF
 systemctl daemon-reload; systemctl enable dnsdist >/dev/null 2>&1; systemctl restart dnsdist
-fi
 
-# === HYSTERIA v1 & CLOUDFLARE WARP ===
+fi
+# === FIN BLOQUE SLIPSTREAM OPCIONAL ===
+
+
+# === HYSTERIA v1 (Sing-box v1.12.22) & CLOUDFLARE WARP ===
 curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
 echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | tee /etc/apt/sources.list.d/cloudflare-client.list
 apt-get update && apt-get install -y cloudflare-warp
@@ -1067,6 +1224,47 @@ mkdir -p /etc/hysteria
 HYST_PORT="${UDP_PORT##*:}"
 
 cat << EOF > /etc/hysteria/hysteria.crt
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number: 40:26:da:91:18:2b:77:9c:85:6a:0c:bb:ca:90:53:fe
+        Signature Algorithm: sha256WithRSAEncryption
+        Issuer: CN=KobZ
+        Validity
+            Not Before: Jul 22 22:23:55 2020 GMT
+            Not After : Jul 20 22:23:55 2030 GMT
+        Subject: CN=server
+        Subject Public Key Info:
+            Public Key Algorithm: rsaEncryption
+                RSA Public-Key: (1024 bit)
+                Modulus:
+                    00:ce:35:23:d8:5d:9f:b6:9b:cb:6a:89:e1:90:af:
+                    42:df:5f:f8:bd:ad:a7:78:9a:ca:20:f0:3d:5b:d6:
+                    c9:ef:4c:4a:99:96:c3:38:fd:59:b4:d7:65:ed:d4:
+                    a7:fa:ab:03:e2:be:88:2f:ca:fc:90:dd:b0:b7:bc:
+                    23:cb:83:ac:36:e2:01:57:69:64:b8:e1:9e:51:f0:
+                    a6:9d:13:d9:92:6b:4d:04:a6:10:64:a3:3f:6b:ff:
+                    fe:32:ac:91:63:c2:71:24:be:9e:76:4f:87:cc:3a:
+                    03:a1:9e:48:3f:11:92:33:3b:19:16:9c:d0:5d:16:
+                    ee:c1:42:67:99:47:66:67:67
+                Exponent: 65537 (0x10001)
+        X509v3 extensions:
+            X509v3 Basic Constraints: CA:FALSE
+            X509v3 Subject Key Identifier: 6B:08:C0:64:10:71:A8:32:7F:0B:FE:1E:98:1F:BD:72:74:0F:C8:66
+            X509v3 Authority Key Identifier: keyid:64:49:32:6F:FE:66:62:F1:57:4D:BB:91:A8:5D:BD:26:3E:51:A4:D2
+                DirName:/CN=KobZ
+                serial:01:A4:01:02:93:12:D9:D6:01:A9:83:DC:03:73:DA:ED:C8:E3:C3:B7
+            X509v3 Extended Key Usage: TLS Web Server Authentication
+            X509v3 Key Usage: Digital Signature, Key Encipherment
+            X509v3 Subject Alternative Name: DNS:server
+    Signature Algorithm: sha256WithRSAEncryption
+         a1:3e:ac:83:0b:e5:5d:ca:36:b7:d0:ab:d0:d9:73:66:d1:62:
+         88:ce:3d:47:9e:08:0b:a0:5b:51:13:fc:7e:d7:6e:17:0e:bd:
+         f5:d9:a9:d9:06:78:52:88:5a:e5:df:d3:32:22:4a:4b:08:6f:
+         b1:22:80:4f:19:d1:5f:9d:b6:5a:17:f7:ad:70:a9:04:00:ff:
+         fe:84:aa:e1:cb:0e:74:c0:1a:75:0b:3e:98:90:1d:22:ba:a4:
+         7a:26:65:7d:d1:3b:5c:45:a1:77:22:ed:b6:6b:18:a3:c4:ee:
+         3e:06:bb:0b:ec:12:ac:16:a5:50:b3:ed:46:43:87:72:fd:75:8c:38
 -----BEGIN CERTIFICATE-----
 MIICVDCCAb2gAwIBAgIQQCbakRgrd5yFagy7ypBT/jANBgkqhkiG9w0BAQsFADAP
 MQ0wCwYDVQQDDARLb2JaMB4XDTIwMDcyMjIyMjM1NVoXDTMwMDcyMDIyMjM1NVow
@@ -1178,7 +1376,7 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload; systemctl enable hysteria-nat.service; systemctl start hysteria-nat.service
 
-# === HYSTERIA 2 ===
+# === HYSTERIA 2 (official core, separate from Hysteria v1) ===
 HYSTERIA2_VER="app/v2.9.3"
 case "$(uname -m)" in
   x86_64|amd64) HYSTERIA2_ASSET="hysteria-linux-amd64" ;;
@@ -1282,6 +1480,8 @@ echo "nameserver DNS1" > /etc/resolv.conf; echo "nameserver DNS2" >> /etc/resolv
 mkdir -p /var/run/sslh; touch /var/run/sslh/sslh.pid; chmod 777 /var/run/sslh/sslh.pid
 iptables -C INPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 53 -j ACCEPT
 
+# Keep Hysteria 2 out of the broad Hysteria 1 DNAT range.
+# This exemption must remain ahead of all range/catch-all DNAT rules.
 iptables -t nat -C PREROUTING -p udp --dport 36713 -j ACCEPT 2>/dev/null || iptables -t nat -I PREROUTING 1 -p udp --dport 36713 -j ACCEPT
 iptables -C INPUT -p udp --dport 36713 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 36713 -j ACCEPT
 
@@ -1332,33 +1532,50 @@ vnstat -u -i "$IFACE" 2>/dev/null || true
 systemctl enable vnstat
 systemctl restart vnstat
 
-# MENU CREATION - FULL WITH DYNAMIC INSECURE PARAMETER
+# MENU CREATION - FULL AND UNCOMPRESSED
 mkdir -p /usr/local/bin
 cat > /usr/local/bin/menu <<'EOF_MENU'
 #!/bin/bash
-set -o pipefail
 
-# Detect if using real cert
+# Detecta si el certificado activo es real (Let's Encrypt) o autofirmado
 if [ -f /etc/xray/cert_type ] && grep -q "letsencrypt" /etc/xray/cert_type; then
     XRAY_INSECURE="0"
 else
     XRAY_INSECURE="1"
 fi
+if [ "$XRAY_INSECURE" = "1" ]; then
+    INSECURE_PARAM="&allowInsecure=1"
+else
+    INSECURE_PARAM=""
+fi
 
-RED='\033[1;31m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'; BLUE='\033[1;34m'
-CYAN='\033[1;36m'; MAGENTA='\033[1;35m'; WHITE='\033[1;37m'; NC='\033[0m'; BOLD='\033[1m'
+# Modern Color Palette
+RED='\033[1;31m'
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[1;34m'
+CYAN='\033[1;36m'
+MAGENTA='\033[1;35m'
+WHITE='\033[1;37m'
+NC='\033[0m' # No Color
+BOLD='\033[1m'
 
 DOMAIN=$(cat /etc/deekayvpn/domain.txt 2>/dev/null || curl -4 -s --max-time 2 ipv4.icanhazip.com)
 SLIPSTREAM_DOMAIN=$(cat /etc/deekayvpn/slipstream_domain.txt 2>/dev/null || echo "No configurado")
 
-HYST_CONFIG="/etc/hysteria/config.json"; HYST_USER_DB="/etc/hysteria/users.txt"
+HYST_CONFIG="/etc/hysteria/config.json"
+HYST_USER_DB="/etc/hysteria/users.txt"
 touch "$HYST_USER_DB" 2>/dev/null || true
 
-HYST2_CONFIG="/etc/hysteria2/config.json"; HYST2_USER_DB="/etc/hysteria2/users.txt"
-HYST2_PORT="${HYST2_PORT:-36713}"; touch "$HYST2_USER_DB" 2>/dev/null || true
+HYST2_CONFIG="/etc/hysteria2/config.json"
+HYST2_USER_DB="/etc/hysteria2/users.txt"
+HYST2_PORT="${HYST2_PORT:-36713}"
+touch "$HYST2_USER_DB" 2>/dev/null || true
 
+# --- Utility Functions ---
 server_ip() { curl -4 -s --max-time 2 ipv4.icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}'; }
 cpu_count() { nproc 2>/dev/null || echo "1"; }
+mem_stats() { free -h 2>/dev/null | awk '/Mem:/ {print $2 "|" $7 "|" $3}'; }
 ram_percent() { free 2>/dev/null | awk '/Mem:/ { if ($2>0) printf "%.1f%%", ($3/$2)*100; else print "0.0%" }'; }
 cpu_percent() { top -bn1 2>/dev/null | awk -F',' '/Cpu\(s\)/ { gsub("%us","",$1); gsub(" ","",$1); split($1,a,":"); if (a[2] == "") print "0.0%"; else printf "%.1f%%", a[2]+0 }'; }
 buffer_mem() { free -m 2>/dev/null | awk '/Mem:/ {print $6 "M"}'; }
@@ -1372,7 +1589,7 @@ server_status() {
 }
 pause_return() { echo; read -rp "Presiona ENTER para volver... " _; }
 
-# Hysteria functions (unchanged)
+# --- HYSTERIA MANAGEMENT FUNCTIONS ---
 add_hysteria() {
     clear
     echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
@@ -1506,263 +1723,7 @@ change_obfs_hysteria() {
     pause_return
 }
 
-# XRAY FUNCTIONS (MODIFIED add_xray)
-add_xray() {
-  clear
-  echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
-  echo -e "                   ${BOLD}CREAR CUENTA XRAY${NC}"
-  echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
-  echo -e " [1] VLESS (TCP, WS, XHTTP, HTTPUpgrade Y gRPC)"
-  echo -e " [2] VMESS (TCP, WS, XHTTP, HTTPUpgrade Y gRPC)"
-  echo -e " [3] TROJAN (TLS)"
-  echo -e " [4] TODO-EN-UNO (VLESS + VMESS + TROJAN)"
-  read -rp " Selecciona Protocolo: " prot
-  read -rp " Nombre de usuario: " user
-  
-  if grep -qw "^$user" /etc/xray/vless.txt /etc/xray/vmess.txt /etc/xray/trojan.txt 2>/dev/null; then
-    echo -e "${RED}¡El nombre de usuario ya existe!${NC}"; pause_return; return
-  fi
-
-  read -rp " Validez (Días): " masa
-  exp=$(date -d "+${masa} days" +"%Y-%m-%d")
-
-  read -rp " ¿Quieres usar un UUID personalizado? (y/N): " custom_uuid_prompt
-  if [[ "$custom_uuid_prompt" =~ ^[Yy]$ ]]; then
-    read -rp " Ingresa el UUID personalizado: " uuid
-  else
-    uuid=$(cat /proc/sys/kernel/random/uuid)
-  fi
-
-  pass="HexTunnel${uuid:0:6}"
-  
-  VLESS_TAGS='["vless-tls-dispatcher","vless-tcp-http","vless-plain-public","vless-ws","vless-xhttp","vless-httpupgrade","vless-grpc"]'
-  VMESS_TAGS='["vmess-tcp-http","vmess-ws","vmess-xhttp","vmess-httpupgrade","vmess-grpc"]'
-  TROJAN_TAGS='["trojan-ws"]'
-
-  INSECURE_PARAM=""
-  if [ "$XRAY_INSECURE" = "1" ]; then
-      INSECURE_PARAM="&allowInsecure=1"
-  fi
-
-  if [ "$prot" == "1" ]; then
-    jq --arg uuid "$uuid" --arg user "$user" --argjson tags "$VLESS_TAGS" \
-      '(.inbounds[] | select(.tag as $t | $tags | index($t)) | .settings.clients) += [{"id": $uuid, "email": $user}]' \
-      /etc/xray/config.json > /tmp/x.json && mv /tmp/x.json /etc/xray/config.json
-    echo "$user $uuid $exp" >> /etc/xray/vless.txt
-    
-    clear
-    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
-    echo -e "                   ${BOLD}CUENTA VLESS CREADA${NC}"
-    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
-    echo -e "Usuario  : $user\nExpira   : $exp"
-    echo -e "\n${YELLOW}[ VLESS TLS / SHARED PORT 443 ]${NC}\n"
-    echo -e "TCP HTTP:  vless://${uuid}@${DOMAIN}:443?type=tcp&headerType=http&security=tls&encryption=none&host=${DOMAIN}&path=%2Fvless-tcp&sni=${DOMAIN}${INSECURE_PARAM}#${user}-VLESS-TCP\n"
-    echo -e "WS:        vless://${uuid}@${DOMAIN}:443?type=ws&security=tls&encryption=none&path=%2Fvless&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}#${user}-VLESS-WS\n"
-    echo -e "XHTTP:     vless://${uuid}@${DOMAIN}:443?type=xhttp&security=tls&encryption=none&path=%2Fxhttp&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}&mode=auto&alpn=h2%2Chttp%2F1.1#${user}-VLESS-XHTTP\n"
-    echo -e "HTTPUp:    vless://${uuid}@${DOMAIN}:443?type=httpupgrade&security=tls&encryption=none&path=%2Fhttpupgrade&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}#${user}-VLESS-HTTPUp\n"
-    echo -e "gRPC:      vless://${uuid}@${DOMAIN}:443?type=grpc&security=tls&encryption=none&serviceName=grpc-svc&sni=${DOMAIN}${INSECURE_PARAM}&alpn=h2#${user}-VLESS-gRPC\n"
-    echo -e "${YELLOW}[ VLESS NTLS (80/8080/8880) ]${NC}\n"
-    echo -e "TCP: vless://${uuid}@${DOMAIN}:80?type=tcp&headerType=http&security=none&encryption=none&path=%2Fvless-tcp&host=${DOMAIN}#${user}-VLESS-NTLS-TCP\n"
-    echo -e "WS:  vless://${uuid}@${DOMAIN}:80?type=ws&security=none&encryption=none&path=%2Fvless&host=${DOMAIN}#${user}-VLESS-NTLS-WS\n"
-    echo -e "HUP: vless://${uuid}@${DOMAIN}:80?type=httpupgrade&security=none&encryption=none&path=%2Fhttpupgrade&host=${DOMAIN}#${user}-VLESS-NTLS-HTTPUp\n"
-    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
-  
-  elif [ "$prot" == "2" ]; then
-    jq --arg uuid "$uuid" --arg user "$user" --argjson tags "$VMESS_TAGS" \
-      '(.inbounds[] | select(.tag as $t | $tags | index($t)) | .settings.clients) += [{"id": $uuid, "alterId": 0, "email": $user}]' \
-      /etc/xray/config.json > /tmp/x.json && mv /tmp/x.json /etc/xray/config.json
-    echo "$user $uuid $exp" >> /etc/xray/vmess.txt
-    
-    clear
-    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
-    echo -e "                   ${BOLD}CUENTA VMESS CREADA${NC}"
-    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
-    echo -e "Usuario: $user\nExpira: $exp"
-    echo -e "\n${YELLOW}[ VMESS TLS / PORT 443 ]${NC}"
-    VMESS_TCP_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-TCP\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"/vmess-tcp\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
-    [ "$XRAY_INSECURE" = "1" ] && VMESS_TCP_JSON="${VMESS_TCP_JSON%\}*},\"allowInsecure\":true}"
-    echo -e "TCP:        vmess://$(echo -n "$VMESS_TCP_JSON" | base64 -w 0)"
-    VMESS_WS_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-WS\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
-    [ "$XRAY_INSECURE" = "1" ] && VMESS_WS_JSON="${VMESS_WS_JSON%\}*},\"allowInsecure\":true}"
-    echo -e "WS:         vmess://$(echo -n "$VMESS_WS_JSON" | base64 -w 0)"
-    VMESS_XHTTP_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-XHTTP\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"xhttp\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-xhttp\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
-    [ "$XRAY_INSECURE" = "1" ] && VMESS_XHTTP_JSON="${VMESS_XHTTP_JSON%\}*},\"allowInsecure\":true}"
-    echo -e "XHTTP:      vmess://$(echo -n "$VMESS_XHTTP_JSON" | base64 -w 0)"
-    VMESS_HUP_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-HUP\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"httpupgrade\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-hup\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
-    [ "$XRAY_INSECURE" = "1" ] && VMESS_HUP_JSON="${VMESS_HUP_JSON%\}*},\"allowInsecure\":true}"
-    echo -e "HTTPUp:     vmess://$(echo -n "$VMESS_HUP_JSON" | base64 -w 0)"
-    VMESS_GRPC_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-gRPC\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"grpc\",\"type\":\"none\",\"host\":\"\",\"path\":\"\",\"serviceName\":\"vmess-grpc-svc\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
-    [ "$XRAY_INSECURE" = "1" ] && VMESS_GRPC_JSON="${VMESS_GRPC_JSON%\}*},\"allowInsecure\":true}"
-    echo -e "gRPC:       vmess://$(echo -n "$VMESS_GRPC_JSON" | base64 -w 0)"
-    echo -e "\n${YELLOW}[ VMESS NTLS / PORT 80 ]${NC}"
-    VMESS_NTCP_JSON="{\"v\":\"2\",\"ps\":\"${user}-NTLS-TCP\",\"add\":\"${DOMAIN}\",\"port\":\"80\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"http\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-tcp\",\"tls\":\"\"}"
-    echo -e "TCP:        vmess://$(echo -n "$VMESS_NTCP_JSON" | base64 -w 0)"
-    VMESS_NWS_JSON="{\"v\":\"2\",\"ps\":\"${user}-NTLS-WS\",\"add\":\"${DOMAIN}\",\"port\":\"80\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess\",\"tls\":\"\"}"
-    echo -e "WS:         vmess://$(echo -n "$VMESS_NWS_JSON" | base64 -w 0)"
-    VMESS_NHUP_JSON="{\"v\":\"2\",\"ps\":\"${user}-NTLS-HUP\",\"add\":\"${DOMAIN}\",\"port\":\"80\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"httpupgrade\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-hup\",\"tls\":\"\"}"
-    echo -e "HTTPUp:     vmess://$(echo -n "$VMESS_NHUP_JSON" | base64 -w 0)"
-    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
-  
-  elif [ "$prot" == "3" ]; then
-    jq --arg pass "$pass" --arg user "$user" --argjson tags "$TROJAN_TAGS" \
-      '(.inbounds[] | select(.tag as $t | $tags | index($t)) | .settings.clients) += [{"password": $pass, "email": $user}]' \
-      /etc/xray/config.json > /tmp/x.json && mv /tmp/x.json /etc/xray/config.json
-    echo "$user $pass $exp" >> /etc/xray/trojan.txt
-    
-    clear
-    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
-    echo -e "                   ${BOLD}CUENTA TROJAN CREADA${NC}"
-    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
-    echo -e "Usuario: $user\nContraseña: $pass\nExpira: $exp"
-    echo -e "\n${YELLOW}TLS (443):${NC}\ntrojan://${pass}@${DOMAIN}:443?type=ws&security=tls&path=%2Ftrojan&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}#${user}"
-    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
-
-  elif [ "$prot" == "4" ]; then
-    jq --arg uuid "$uuid" --arg pass "$pass" --arg user "$user" \
-      --argjson vtags "$VLESS_TAGS" --argjson mtags "$VMESS_TAGS" --argjson ttags "$TROJAN_TAGS" \
-      '(.inbounds[] | select(.tag as $t | $vtags | index($t)) | .settings.clients) += [{"id": $uuid, "email": $user}]
-       | (.inbounds[] | select(.tag as $t | $mtags | index($t)) | .settings.clients) += [{"id": $uuid, "alterId": 0, "email": $user}]
-       | (.inbounds[] | select(.tag as $t | $ttags | index($t)) | .settings.clients) += [{"password": $pass, "email": $user}]' \
-      /etc/xray/config.json > /tmp/x.json && mv /tmp/x.json /etc/xray/config.json
-    
-    echo "$user $uuid $exp" >> /etc/xray/vless.txt
-    echo "$user $uuid $exp" >> /etc/xray/vmess.txt
-    echo "$user $pass $exp" >> /etc/xray/trojan.txt
-
-    clear
-    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
-    echo -e "               ${BOLD}CUENTA TODO-EN-UNO CREADA${NC}"
-    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
-    echo -e "Usuario: $user\nExpira:   $exp"
-    echo -e "${CYAN}--------------------------------------------------------------${NC}"
-    
-    echo -e "\n${YELLOW}[ VLESS TLS / SHARED PORT 443 ]${NC}\n"
-    echo -e "TCP HTTP:  vless://${uuid}@${DOMAIN}:443?type=tcp&headerType=http&security=tls&encryption=none&host=${DOMAIN}&path=%2Fvless-tcp&sni=${DOMAIN}${INSECURE_PARAM}#${user}-VLESS-TCP\n"
-    echo -e "WS:        vless://${uuid}@${DOMAIN}:443?type=ws&security=tls&encryption=none&path=%2Fvless&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}#${user}-VLESS-WS\n"
-    echo -e "XHTTP:     vless://${uuid}@${DOMAIN}:443?type=xhttp&security=tls&encryption=none&path=%2Fxhttp&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}&mode=auto&alpn=h2%2Chttp%2F1.1#${user}-VLESS-XHTTP\n"
-    echo -e "HTTPUp:    vless://${uuid}@${DOMAIN}:443?type=httpupgrade&security=tls&encryption=none&path=%2Fhttpupgrade&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}#${user}-VLESS-HTTPUp\n"
-    echo -e "gRPC:      vless://${uuid}@${DOMAIN}:443?type=grpc&security=tls&encryption=none&serviceName=grpc-svc&sni=${DOMAIN}${INSECURE_PARAM}&alpn=h2#${user}-VLESS-gRPC\n"
-
-    echo -e "${YELLOW}[ VLESS NTLS (80/8080/8880) ]${NC}\n"
-    echo -e "TCP: vless://${uuid}@${DOMAIN}:80?type=tcp&headerType=http&security=none&encryption=none&path=%2Fvless-tcp&host=${DOMAIN}#${user}-VLESS-NTLS-TCP\n"
-    echo -e "WS:  vless://${uuid}@${DOMAIN}:80?type=ws&security=none&encryption=none&path=%2Fvless&host=${DOMAIN}#${user}-VLESS-NTLS-WS\n"
-    echo -e "HUP: vless://${uuid}@${DOMAIN}:80?type=httpupgrade&security=none&encryption=none&path=%2Fhttpupgrade&host=${DOMAIN}#${user}-VLESS-NTLS-HTTPUp\n"
-
-    echo -e "\n${YELLOW}[ VMESS TLS / PORT 443 ]${NC}"
-    VMESS_TCP_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-TCP\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"/vmess-tcp\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
-    [ "$XRAY_INSECURE" = "1" ] && VMESS_TCP_JSON="${VMESS_TCP_JSON%\}*},\"allowInsecure\":true}"
-    echo -e "TCP:        vmess://$(echo -n "$VMESS_TCP_JSON" | base64 -w 0)"
-    VMESS_WS_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-WS\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
-    [ "$XRAY_INSECURE" = "1" ] && VMESS_WS_JSON="${VMESS_WS_JSON%\}*},\"allowInsecure\":true}"
-    echo -e "WS:         vmess://$(echo -n "$VMESS_WS_JSON" | base64 -w 0)"
-    VMESS_XHTTP_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-XHTTP\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"xhttp\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-xhttp\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
-    [ "$XRAY_INSECURE" = "1" ] && VMESS_XHTTP_JSON="${VMESS_XHTTP_JSON%\}*},\"allowInsecure\":true}"
-    echo -e "XHTTP:      vmess://$(echo -n "$VMESS_XHTTP_JSON" | base64 -w 0)"
-    VMESS_HUP_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-HUP\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"httpupgrade\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-hup\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
-    [ "$XRAY_INSECURE" = "1" ] && VMESS_HUP_JSON="${VMESS_HUP_JSON%\}*},\"allowInsecure\":true}"
-    echo -e "HTTPUp:     vmess://$(echo -n "$VMESS_HUP_JSON" | base64 -w 0)"
-    VMESS_GRPC_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-gRPC\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"grpc\",\"type\":\"none\",\"host\":\"\",\"path\":\"\",\"serviceName\":\"vmess-grpc-svc\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
-    [ "$XRAY_INSECURE" = "1" ] && VMESS_GRPC_JSON="${VMESS_GRPC_JSON%\}*},\"allowInsecure\":true}"
-    echo -e "gRPC:       vmess://$(echo -n "$VMESS_GRPC_JSON" | base64 -w 0)"
-    echo -e "\n${YELLOW}[ VMESS NTLS / PORT 80 ]${NC}"
-    VMESS_NTCP_JSON="{\"v\":\"2\",\"ps\":\"${user}-NTLS-TCP\",\"add\":\"${DOMAIN}\",\"port\":\"80\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"http\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-tcp\",\"tls\":\"\"}"
-    echo -e "TCP:        vmess://$(echo -n "$VMESS_NTCP_JSON" | base64 -w 0)"
-    VMESS_NWS_JSON="{\"v\":\"2\",\"ps\":\"${user}-NTLS-WS\",\"add\":\"${DOMAIN}\",\"port\":\"80\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess\",\"tls\":\"\"}"
-    echo -e "WS:         vmess://$(echo -n "$VMESS_NWS_JSON" | base64 -w 0)"
-    VMESS_NHUP_JSON="{\"v\":\"2\",\"ps\":\"${user}-NTLS-HUP\",\"add\":\"${DOMAIN}\",\"port\":\"80\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"httpupgrade\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-hup\",\"tls\":\"\"}"
-    echo -e "HTTPUp:     vmess://$(echo -n "$VMESS_NHUP_JSON" | base64 -w 0)"
-
-    echo -e "\n${YELLOW}[ TROJAN TLS (443) ]${NC}\ntrojan://${pass}@${DOMAIN}:443?type=ws&security=tls&path=%2Ftrojan&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}#${user}"
-    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
-  fi
-  systemctl restart xray
-  pause_return
-}
-
-# The rest of the menu functions (del_xray, renew_xray, show_xray, Hysteria2, etc.) remain exactly as in the original script.
-# I'll include them all for completeness.
-
-del_xray() {
-  clear
-  echo -e "${RED}══════════════════════════════════════════════════════════════${NC}"
-  echo -e "                   ${BOLD}ELIMINAR CUENTA XRAY${NC}"
-  echo -e "${RED}══════════════════════════════════════════════════════════════${NC}"
-  
-  mapfile -t users < <(cat /etc/xray/*.txt 2>/dev/null | awk '{print $1}' | sort -u)
-  
-  if [ ${#users[@]} -eq 0 ]; then 
-      echo -e "${YELLOW}No se encontraron usuarios de Xray.${NC}"; pause_return; return
-  fi
-  for i in "${!users[@]}"; do printf "  [${YELLOW}%02d${NC}] %s\n" $((i+1)) "${users[$i]}"; done
-  echo -e "\n  [${YELLOW}00${NC}] Cancelar\n"
-
-  read -rp "  Selecciona usuario a eliminar: " idx
-  if [[ "$idx" == "00" || "$idx" == "0" ]]; then return; fi
-  if ! [[ "$idx" =~ ^[0-9]+$ ]] || [ "$idx" -le 0 ] || [ "$idx" -gt "${#users[@]}" ]; then 
-      echo -e "${RED}Selección inválida.${NC}"; pause_return; return 
-  fi
-
-  user="${users[$((idx-1))]}"
-  jq "(.inbounds[].settings.clients) |= map(select(.email != \"$user\"))" /etc/xray/config.json > /tmp/x.json && mv /tmp/x.json /etc/xray/config.json
-  sed -i "/^$user /d" /etc/xray/vless.txt /etc/xray/vmess.txt /etc/xray/trojan.txt 2>/dev/null
-  systemctl restart xray
-  echo -e "\n${GREEN}✔ Usuario $user eliminado exitosamente.${NC}"
-  pause_return
-}
-
-renew_xray() {
-  clear
-  echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
-  echo -e "                   ${BOLD}RENOVAR CUENTA XRAY${NC}"
-  echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
-  read -rp " Usuario a renovar: " user
-  
-  if ! grep -qw "^$user" /etc/xray/vless.txt /etc/xray/vmess.txt /etc/xray/trojan.txt 2>/dev/null; then 
-    echo -e "${RED}Usuario no encontrado.${NC}"; pause_return; return
-  fi
-  read -rp " Días a Agregar: " days
-  for proto in vless vmess trojan; do 
-    if grep -qw "^$user" "/etc/xray/${proto}.txt"; then
-      current_exp=$(grep -w "^$user" "/etc/xray/${proto}.txt" | awk '{print $3}')
-      new_exp=$(date -d "$current_exp + $days days" +"%Y-%m-%d")
-      sed -i "s/^$user .* $current_exp/$(grep -w "^$user" "/etc/xray/${proto}.txt" | awk '{print $1 " " $2}') $new_exp/" "/etc/xray/${proto}.txt"
-    fi
-  done
-  echo -e "\n${GREEN}✔ Usuario '$user' renovado exitosamente.${NC}\nNueva Expiración: $new_exp"
-  pause_return
-}
-
-show_xray() {
-  clear
-  echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
-  echo -e "                   ${BOLD}MOSTRAR ENLACES DE CONFIG XRAY${NC}"
-  echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
-  read -rp " Usuario a ver: " user
-  local found=0
-  if grep -qw "^$user" /etc/xray/vless.txt; then
-    uuid=$(grep -w "^$user" /etc/xray/vless.txt | awk '{print $2}')
-    echo -e "${YELLOW}VLESS TLS (443):${NC}\nvless://${uuid}@${DOMAIN}:443?type=ws&security=tls&encryption=none&path=%2Fvless&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}#${user}"
-    echo -e "\n${YELLOW}VLESS NTLS (80):${NC}\nvless://${uuid}@${DOMAIN}:80?type=ws&security=none&encryption=none&path=%2Fvless&host=${DOMAIN}#${user}\n"
-    found=1
-  fi
-  if grep -qw "^$user" /etc/xray/vmess.txt; then
-    uuid=$(grep -w "^$user" /etc/xray/vmess.txt | awk '{print $2}')
-    VMESS_TLS_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
-    echo -e "${YELLOW}VMESS TLS (443):${NC}\nvmess://$(echo -n "$VMESS_TLS_JSON" | base64 -w 0)"
-    VMESS_NTLS_JSON="{\"v\":\"2\",\"ps\":\"${user}-NTLS\",\"add\":\"${DOMAIN}\",\"port\":\"80\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess\",\"tls\":\"\"}"
-    echo -e "\n${YELLOW}VMESS NTLS (80):${NC}\nvmess://$(echo -n "$VMESS_NTLS_JSON" | base64 -w 0)\n"
-    found=1
-  fi
-  if grep -qw "^$user" /etc/xray/trojan.txt; then
-    pass=$(grep -w "^$user" /etc/xray/trojan.txt | awk '{print $2}')
-    echo -e "${YELLOW}TROJAN TLS (443):${NC}\ntrojan://${pass}@${DOMAIN}:443?type=ws&security=tls&path=%2Ftrojan&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}#${user}\n"
-    found=1
-  fi
-  if [ "$found" -eq 0 ]; then echo -e "${RED}Usuario no encontrado en ningún protocolo.${NC}"; fi
-  pause_return
-}
-
-# Hysteria 2 functions (same as original)
+# --- HYSTERIA 2 MANAGEMENT FUNCTIONS ---
 print_hysteria2_link() {
   local user="$1" token="$2" encoded_token encoded_obfs insecure
   encoded_token=$(jq -nr --arg v "$token" '$v|@uri')
@@ -1854,7 +1815,246 @@ show_hysteria2() {
     pause_return
 }
 
-# SSH USER FUNCTIONS (unchanged)
+# --- XRAY MANAGEMENT FUNCTIONS ---
+add_xray() {
+  clear
+  echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+  echo -e "                   ${BOLD}CREAR CUENTA XRAY${NC}"
+  echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+  echo -e " [1] VLESS (TCP, WS, XHTTP, HTTPUpgrade Y gRPC)"
+  echo -e " [2] VMESS (TCP, WS, XHTTP, HTTPUpgrade Y gRPC)"
+  echo -e " [3] TROJAN (TLS)"
+  echo -e " [4] TODO-EN-UNO (VLESS + VMESS + TROJAN)"
+  read -rp " Selecciona Protocolo: " prot
+  read -rp " Nombre de usuario: " user
+  
+  if grep -qw "^$user" /etc/xray/vless.txt /etc/xray/vmess.txt /etc/xray/trojan.txt 2>/dev/null; then
+    echo -e "${RED}¡El nombre de usuario ya existe!${NC}"; pause_return; return
+  fi
+
+  read -rp " Validez (Días): " masa
+  exp=$(date -d "+${masa} days" +"%Y-%m-%d")
+
+  read -rp " ¿Quieres usar un UUID personalizado? (y/N): " custom_uuid_prompt
+  if [[ "$custom_uuid_prompt" =~ ^[Yy]$ ]]; then
+    read -rp " Ingresa el UUID personalizado: " uuid
+  else
+    uuid=$(cat /proc/sys/kernel/random/uuid)
+  fi
+
+  pass="HexTunnel${uuid:0:6}"
+  
+  VLESS_TAGS='["vless-tls-dispatcher","vless-tcp-http","vless-plain-public","vless-ws","vless-xhttp","vless-httpupgrade","vless-grpc"]'
+  VMESS_TAGS='["vmess-tcp-http","vmess-ws","vmess-xhttp","vmess-httpupgrade","vmess-grpc"]'
+  TROJAN_TAGS='["trojan-ws"]'
+
+  if [ "$prot" == "1" ]; then
+    jq --arg uuid "$uuid" --arg user "$user" --argjson tags "$VLESS_TAGS" \
+      '(.inbounds[] | select(.tag as $t | $tags | index($t)) | .settings.clients) += [{"id": $uuid, "email": $user}]' \
+      /etc/xray/config.json > /tmp/x.json && mv /tmp/x.json /etc/xray/config.json
+    echo "$user $uuid $exp" >> /etc/xray/vless.txt
+    
+    clear
+    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+    echo -e "                   ${BOLD}CUENTA VLESS CREADA${NC}"
+    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+    echo -e "Usuario  : $user\nExpira   : $exp"
+  echo -e "\n${YELLOW}[ VLESS TLS / SHARED PORT 443 ]${NC}\n"
+  echo -e "TCP HTTP:  vless://${uuid}@${DOMAIN}:443?type=tcp&headerType=http&security=tls&encryption=none&host=${DOMAIN}&path=%2Fvless-tcp&sni=${DOMAIN}${INSECURE_PARAM}#${user}-VLESS-TCP\n"
+  echo -e "WS:        vless://${uuid}@${DOMAIN}:443?type=ws&security=tls&encryption=none&path=%2Fvless&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}#${user}-VLESS-WS\n"
+  echo -e "XHTTP:     vless://${uuid}@${DOMAIN}:443?type=xhttp&security=tls&encryption=none&path=%2Fxhttp&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}&mode=auto&alpn=h2%2Chttp%2F1.1#${user}-VLESS-XHTTP\n"
+  echo -e "HTTPUp:    vless://${uuid}@${DOMAIN}:443?type=httpupgrade&security=tls&encryption=none&path=%2Fhttpupgrade&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}#${user}-VLESS-HTTPUp\n"
+  echo -e "gRPC:      vless://${uuid}@${DOMAIN}:443?type=grpc&security=tls&encryption=none&serviceName=grpc-svc&sni=${DOMAIN}${INSECURE_PARAM}&alpn=h2#${user}-VLESS-gRPC\n"
+
+  echo -e "${YELLOW}[ VLESS NTLS (80/8080/8880) ]${NC}\n"
+  echo -e "TCP: vless://${uuid}@${DOMAIN}:80?type=tcp&headerType=http&security=none&encryption=none&path=%2Fvless-tcp&host=${DOMAIN}#${user}-VLESS-NTLS-TCP\n"
+  echo -e "WS:  vless://${uuid}@${DOMAIN}:80?type=ws&security=none&encryption=none&path=%2Fvless&host=${DOMAIN}#${user}-VLESS-NTLS-WS\n"
+  echo -e "HUP: vless://${uuid}@${DOMAIN}:80?type=httpupgrade&security=none&encryption=none&path=%2Fhttpupgrade&host=${DOMAIN}#${user}-VLESS-NTLS-HTTPUp\n"
+    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+  
+  elif [ "$prot" == "2" ]; then
+    jq --arg uuid "$uuid" --arg user "$user" --argjson tags "$VMESS_TAGS" \
+      '(.inbounds[] | select(.tag as $t | $tags | index($t)) | .settings.clients) += [{"id": $uuid, "alterId": 0, "email": $user}]' \
+      /etc/xray/config.json > /tmp/x.json && mv /tmp/x.json /etc/xray/config.json
+    echo "$user $uuid $exp" >> /etc/xray/vmess.txt
+    
+    clear
+    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+    echo -e "                   ${BOLD}CUENTA VMESS CREADA${NC}"
+    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+    echo -e "Usuario: $user\nExpira: $exp"
+      echo -e "\n${YELLOW}[ VMESS TLS / PORT 443 ]${NC}"
+VMESS_TCP_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-TCP\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"/vmess-tcp\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
+echo -e "TCP:        vmess://$(echo -n "$VMESS_TCP_JSON" | base64 -w 0)"
+VMESS_WS_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-WS\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
+echo -e "WS:         vmess://$(echo -n "$VMESS_WS_JSON" | base64 -w 0)"
+VMESS_XHTTP_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-XHTTP\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"xhttp\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-xhttp\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
+echo -e "XHTTP:      vmess://$(echo -n "$VMESS_XHTTP_JSON" | base64 -w 0)"
+VMESS_HUP_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-HUP\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"httpupgrade\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-hup\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
+echo -e "HTTPUp:     vmess://$(echo -n "$VMESS_HUP_JSON" | base64 -w 0)"
+VMESS_GRPC_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-gRPC\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"grpc\",\"type\":\"none\",\"host\":\"\",\"path\":\"\",\"serviceName\":\"vmess-grpc-svc\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
+echo -e "gRPC:       vmess://$(echo -n "$VMESS_GRPC_JSON" | base64 -w 0)"
+echo -e "\n${YELLOW}[ VMESS NTLS / PORT 80 ]${NC}"
+VMESS_NTCP_JSON="{\"v\":\"2\",\"ps\":\"${user}-NTLS-TCP\",\"add\":\"${DOMAIN}\",\"port\":\"80\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"http\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-tcp\",\"tls\":\"\"}"
+echo -e "TCP:        vmess://$(echo -n "$VMESS_NTCP_JSON" | base64 -w 0)"
+VMESS_NWS_JSON="{\"v\":\"2\",\"ps\":\"${user}-NTLS-WS\",\"add\":\"${DOMAIN}\",\"port\":\"80\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess\",\"tls\":\"\"}"
+echo -e "WS:         vmess://$(echo -n "$VMESS_NWS_JSON" | base64 -w 0)"
+VMESS_NHUP_JSON="{\"v\":\"2\",\"ps\":\"${user}-NTLS-HUP\",\"add\":\"${DOMAIN}\",\"port\":\"80\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"httpupgrade\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-hup\",\"tls\":\"\"}"
+echo -e "HTTPUp:     vmess://$(echo -n "$VMESS_NHUP_JSON" | base64 -w 0)"
+    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+  
+  elif [ "$prot" == "3" ]; then
+    jq --arg pass "$pass" --arg user "$user" --argjson tags "$TROJAN_TAGS" \
+      '(.inbounds[] | select(.tag as $t | $tags | index($t)) | .settings.clients) += [{"password": $pass, "email": $user}]' \
+      /etc/xray/config.json > /tmp/x.json && mv /tmp/x.json /etc/xray/config.json
+    echo "$user $pass $exp" >> /etc/xray/trojan.txt
+    
+    clear
+    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+    echo -e "                   ${BOLD}CUENTA TROJAN CREADA${NC}"
+    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+    echo -e "Usuario: $user\nContraseña: $pass\nExpira: $exp"
+    echo -e "\n${YELLOW}TLS (443):${NC}\ntrojan://${pass}@${DOMAIN}:443?type=ws&security=tls&path=%2Ftrojan&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}#${user}"
+    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+
+  elif [ "$prot" == "4" ]; then
+    jq --arg uuid "$uuid" --arg pass "$pass" --arg user "$user" \
+      --argjson vtags "$VLESS_TAGS" --argjson mtags "$VMESS_TAGS" --argjson ttags "$TROJAN_TAGS" \
+      '(.inbounds[] | select(.tag as $t | $vtags | index($t)) | .settings.clients) += [{"id": $uuid, "email": $user}]
+       | (.inbounds[] | select(.tag as $t | $mtags | index($t)) | .settings.clients) += [{"id": $uuid, "alterId": 0, "email": $user}]
+       | (.inbounds[] | select(.tag as $t | $ttags | index($t)) | .settings.clients) += [{"password": $pass, "email": $user}]' \
+      /etc/xray/config.json > /tmp/x.json && mv /tmp/x.json /etc/xray/config.json
+    
+    echo "$user $uuid $exp" >> /etc/xray/vless.txt
+    echo "$user $uuid $exp" >> /etc/xray/vmess.txt
+    echo "$user $pass $exp" >> /etc/xray/trojan.txt
+
+    clear
+    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+    echo -e "               ${BOLD}CUENTA TODO-EN-UNO CREADA${NC}"
+    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+    echo -e "Usuario: $user\nExpira:   $exp"
+    echo -e "${CYAN}--------------------------------------------------------------${NC}"
+    
+      echo -e "\n${YELLOW}[ VLESS TLS / SHARED PORT 443 ]${NC}\n"
+  echo -e "TCP HTTP:  vless://${uuid}@${DOMAIN}:443?type=tcp&headerType=http&security=tls&encryption=none&host=${DOMAIN}&path=%2Fvless-tcp&sni=${DOMAIN}${INSECURE_PARAM}#${user}-VLESS-TCP\n"
+  echo -e "WS:        vless://${uuid}@${DOMAIN}:443?type=ws&security=tls&encryption=none&path=%2Fvless&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}#${user}-VLESS-WS\n"
+  echo -e "XHTTP:     vless://${uuid}@${DOMAIN}:443?type=xhttp&security=tls&encryption=none&path=%2Fxhttp&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}&mode=auto&alpn=h2%2Chttp%2F1.1#${user}-VLESS-XHTTP\n"
+  echo -e "HTTPUp:    vless://${uuid}@${DOMAIN}:443?type=httpupgrade&security=tls&encryption=none&path=%2Fhttpupgrade&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}#${user}-VLESS-HTTPUp\n"
+  echo -e "gRPC:      vless://${uuid}@${DOMAIN}:443?type=grpc&security=tls&encryption=none&serviceName=grpc-svc&sni=${DOMAIN}${INSECURE_PARAM}&alpn=h2#${user}-VLESS-gRPC\n"
+
+  echo -e "${YELLOW}[ VLESS NTLS (80/8080/8880) ]${NC}\n"
+  echo -e "TCP: vless://${uuid}@${DOMAIN}:80?type=tcp&headerType=http&security=none&encryption=none&path=%2Fvless-tcp&host=${DOMAIN}#${user}-VLESS-NTLS-TCP\n"
+  echo -e "WS:  vless://${uuid}@${DOMAIN}:80?type=ws&security=none&encryption=none&path=%2Fvless&host=${DOMAIN}#${user}-VLESS-NTLS-WS\n"
+  echo -e "HUP: vless://${uuid}@${DOMAIN}:80?type=httpupgrade&security=none&encryption=none&path=%2Fhttpupgrade&host=${DOMAIN}#${user}-VLESS-NTLS-HTTPUp\n"
+
+  echo -e "\n${YELLOW}[ VMESS TLS / PORT 443 ]${NC}"
+VMESS_TCP_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-TCP\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"/vmess-tcp\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
+echo -e "TCP:        vmess://$(echo -n "$VMESS_TCP_JSON" | base64 -w 0)"
+VMESS_WS_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-WS\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
+echo -e "WS:         vmess://$(echo -n "$VMESS_WS_JSON" | base64 -w 0)"
+VMESS_XHTTP_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-XHTTP\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"xhttp\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-xhttp\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
+echo -e "XHTTP:      vmess://$(echo -n "$VMESS_XHTTP_JSON" | base64 -w 0)"
+VMESS_HUP_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-HUP\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"httpupgrade\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-hup\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
+echo -e "HTTPUp:     vmess://$(echo -n "$VMESS_HUP_JSON" | base64 -w 0)"
+VMESS_GRPC_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-gRPC\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"grpc\",\"type\":\"none\",\"host\":\"\",\"path\":\"\",\"serviceName\":\"vmess-grpc-svc\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
+echo -e "gRPC:       vmess://$(echo -n "$VMESS_GRPC_JSON" | base64 -w 0)"
+echo -e "\n${YELLOW}[ VMESS NTLS / PORT 80 ]${NC}"
+VMESS_NTCP_JSON="{\"v\":\"2\",\"ps\":\"${user}-NTLS-TCP\",\"add\":\"${DOMAIN}\",\"port\":\"80\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"http\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-tcp\",\"tls\":\"\"}"
+echo -e "TCP:        vmess://$(echo -n "$VMESS_NTCP_JSON" | base64 -w 0)"
+VMESS_NWS_JSON="{\"v\":\"2\",\"ps\":\"${user}-NTLS-WS\",\"add\":\"${DOMAIN}\",\"port\":\"80\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess\",\"tls\":\"\"}"
+echo -e "WS:         vmess://$(echo -n "$VMESS_NWS_JSON" | base64 -w 0)"
+VMESS_NHUP_JSON="{\"v\":\"2\",\"ps\":\"${user}-NTLS-HUP\",\"add\":\"${DOMAIN}\",\"port\":\"80\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"httpupgrade\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-hup\",\"tls\":\"\"}"
+echo -e "HTTPUp:     vmess://$(echo -n "$VMESS_NHUP_JSON" | base64 -w 0)"
+
+    echo -e "\n${YELLOW}[ TROJAN TLS (443) ]${NC}\ntrojan://${pass}@${DOMAIN}:443?type=ws&security=tls&path=%2Ftrojan&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}#${user}"
+    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
+  fi
+  systemctl restart xray
+  pause_return
+}
+
+del_xray() {
+  clear
+  echo -e "${RED}══════════════════════════════════════════════════════════════${NC}"
+  echo -e "                   ${BOLD}ELIMINAR CUENTA XRAY${NC}"
+  echo -e "${RED}══════════════════════════════════════════════════════════════${NC}"
+  
+  mapfile -t users < <(cat /etc/xray/*.txt 2>/dev/null | awk '{print $1}' | sort -u)
+  
+  if [ ${#users[@]} -eq 0 ]; then 
+      echo -e "${YELLOW}No se encontraron usuarios de Xray.${NC}"; pause_return; return
+  fi
+  for i in "${!users[@]}"; do printf "  [${YELLOW}%02d${NC}] %s\n" $((i+1)) "${users[$i]}"; done
+  echo -e "\n  [${YELLOW}00${NC}] Cancelar\n"
+
+  read -rp "  Selecciona usuario a eliminar: " idx
+  if [[ "$idx" == "00" || "$idx" == "0" ]]; then return; fi
+  if ! [[ "$idx" =~ ^[0-9]+$ ]] || [ "$idx" -le 0 ] || [ "$idx" -gt "${#users[@]}" ]; then 
+      echo -e "${RED}Selección inválida.${NC}"; pause_return; return 
+  fi
+
+  user="${users[$((idx-1))]}"
+  jq "(.inbounds[].settings.clients) |= map(select(.email != \"$user\"))" /etc/xray/config.json > /tmp/x.json && mv /tmp/x.json /etc/xray/config.json
+  sed -i "/^$user /d" /etc/xray/vless.txt /etc/xray/vmess.txt /etc/xray/trojan.txt 2>/dev/null
+  systemctl restart xray
+  echo -e "\n${GREEN}✔ Usuario $user eliminado exitosamente.${NC}"
+  pause_return
+}
+
+renew_xray() {
+  clear
+  echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+  echo -e "                   ${BOLD}RENOVAR CUENTA XRAY${NC}"
+  echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+  read -rp " Usuario a renovar: " user
+  
+  if ! grep -qw "^$user" /etc/xray/vless.txt /etc/xray/vmess.txt /etc/xray/trojan.txt 2>/dev/null; then 
+    echo -e "${RED}Usuario no encontrado.${NC}"; pause_return; return
+  fi
+  read -rp " Días a Agregar: " days
+  for proto in vless vmess trojan; do 
+    if grep -qw "^$user" "/etc/xray/${proto}.txt"; then
+      current_exp=$(grep -w "^$user" "/etc/xray/${proto}.txt" | awk '{print $3}')
+      new_exp=$(date -d "$current_exp + $days days" +"%Y-%m-%d")
+      sed -i "s/^$user .* $current_exp/$(grep -w "^$user" "/etc/xray/${proto}.txt" | awk '{print $1 " " $2}') $new_exp/" "/etc/xray/${proto}.txt"
+    fi
+  done
+  echo -e "\n${GREEN}✔ Usuario '$user' renovado exitosamente.${NC}\nNueva Expiración: $new_exp"
+  pause_return
+}
+
+show_xray() {
+  clear
+  echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+  echo -e "                   ${BOLD}MOSTRAR ENLACES DE CONFIG XRAY${NC}"
+  echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+  read -rp " Usuario a ver: " user
+  local found=0
+  if grep -qw "^$user" /etc/xray/vless.txt; then
+    uuid=$(grep -w "^$user" /etc/xray/vless.txt | awk '{print $2}')
+    echo -e "${YELLOW}VLESS TLS (443):${NC}\nvless://${uuid}@${DOMAIN}:443?type=ws&security=tls&encryption=none&path=%2Fvless&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}#${user}"
+    echo -e "\n${YELLOW}VLESS NTLS (80):${NC}\nvless://${uuid}@${DOMAIN}:80?type=ws&security=none&encryption=none&path=%2Fvless&host=${DOMAIN}#${user}\n"
+    found=1
+  fi
+  if grep -qw "^$user" /etc/xray/vmess.txt; then
+    uuid=$(grep -w "^$user" /etc/xray/vmess.txt | awk '{print $2}')
+    VMESS_TLS_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
+    echo -e "${YELLOW}VMESS TLS (443):${NC}\nvmess://$(echo -n "$VMESS_TLS_JSON" | base64 -w 0)"
+    VMESS_NTLS_JSON="{\"v\":\"2\",\"ps\":\"${user}-NTLS\",\"add\":\"${DOMAIN}\",\"port\":\"80\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess\",\"tls\":\"\"}"
+    echo -e "\n${YELLOW}VMESS NTLS (80):${NC}\nvmess://$(echo -n "$VMESS_NTLS_JSON" | base64 -w 0)\n"
+    found=1
+  fi
+  if grep -qw "^$user" /etc/xray/trojan.txt; then
+    pass=$(grep -w "^$user" /etc/xray/trojan.txt | awk '{print $2}')
+    echo -e "${YELLOW}TROJAN TLS (443):${NC}\ntrojan://${pass}@${DOMAIN}:443?type=ws&security=tls&path=%2Ftrojan&host=${DOMAIN}&sni=${DOMAIN}${INSECURE_PARAM}#${user}\n"
+    found=1
+  fi
+  if [ "$found" -eq 0 ]; then echo -e "${RED}Usuario no encontrado en ningún protocolo.${NC}"; fi
+  pause_return
+}
+
+# --- SSH USER FUNCTIONS ---
 list_real_users() { awk -F: '$3 >= 1000 && $1 != "nobody" && $1 != "systemd-network" && $1 != "messagebus" {print $1}' /etc/passwd 2>/dev/null; }
 
 select_user() {
@@ -1926,7 +2126,10 @@ delete_user() {
   clear; echo -e "${RED}Advertencia: Estás a punto de eliminar al usuario: ${YELLOW}$SELECTED_USER${NC}"
   read -rp "¿Estás seguro? [y/N]: " ans
   if [[ "$ans" =~ ^[Yy]$ ]]; then
+    # Force kill all processes owned by the user to free up the account
     pkill -u "$SELECTED_USER" 2>/dev/null
+    
+    # Execute forced deletion
     if userdel -r -f "$SELECTED_USER" 2>/dev/null || userdel -f "$SELECTED_USER" 2>/dev/null; then
         echo -e "${GREEN}El usuario $SELECTED_USER ha sido eliminado.${NC}"
     else
@@ -1949,8 +2152,7 @@ extend_user() {
   pause_return
 }
 
-# Monitor, service controls, backup, utilities, domain mgmt, etc. (same as original)
-# I'll include the remaining essential functions to keep the menu complete, but they are unchanged.
+# --- Monitor ---
 online_users() {
   clear
   echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
@@ -2009,6 +2211,7 @@ online_users() {
   pause_return
 }
 
+# --- Service Controls ---
 restart_service() {
   local service_name="$1"
   local display_name="$2"
@@ -2046,6 +2249,7 @@ service_control_menu() {
   done
 }
 
+# --- Backup & Restore ---
 backup_snapshot() {
   clear; local out="/root/hextunnel_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
   echo -e "Empaquetando configuraciones del servidor..."
@@ -2077,14 +2281,15 @@ restore_snapshot() {
   pause_return
 }
 
+# --- System Utilities ---
 utilities_menu() {
   while true; do
     clear
     echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
     echo -e "                   ${BOLD}UTILIDADES DEL SISTEMA${NC}"
     echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
-    echo -e "  [${YELLOW}1${NC}] Activar BBR Nativo del Kernel"
-    echo -e "  [${YELLOW}2${NC}] Verificar Desbloqueos de Netflix y Streaming"
+    echo -e "  [${YELLOW}1${NC}] Activar BBR Nativo del Kernel (Rápido y Silencioso)"
+    echo -e "  [${YELLOW}2${NC}] Verificar Desbloqueos de Netflix y Streaming (Inglés)"
     echo -e "  [${YELLOW}0${NC}] Atrás\n"
     read -rp "  Selecciona una opción: " subopt
     case "$subopt" in 
@@ -2101,7 +2306,7 @@ utilities_menu() {
          ;; 
       2) 
          clear
-         echo -e "${YELLOW}Ejecutando Verificación de Restricción Regional...${NC}\n"
+         echo -e "${YELLOW}Ejecutando Verificación de Restricción Regional (Inglés)...${NC}\n"
          bash <(curl -sL https://raw.githubusercontent.com/lmc999/RegionRestrictionCheck/main/check.sh) -E en
          echo ""
          pause_return 
@@ -2112,18 +2317,93 @@ utilities_menu() {
   done
 }
 
+# --- Domain & DNS Management ---
 change_domain() {
     clear
     echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
     echo -e "                 ${BOLD}CAMBIAR DOMINIO DEL SERVIDOR${NC}"
     echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
     current_dom=$(cat /etc/deekayvpn/domain.txt 2>/dev/null || echo "No configurado")
-    echo -e " Dominio/IP Actual: ${YELLOW}$current_dom${NC}\n"
+    current_cert=$(cat /etc/xray/cert_type 2>/dev/null || echo "desconocido")
+    echo -e " Dominio/IP Actual: ${YELLOW}$current_dom${NC}  (certificado: ${YELLOW}$current_cert${NC})\n"
     read -rp " Ingresa Nuevo Dominio o IP: " new_dom
-    if [ -n "$new_dom" ]; then
-        echo "$new_dom" > /etc/deekayvpn/domain.txt; DOMAIN="$new_dom"
-        echo -e "\n${GREEN}✔ Dominio actualizado exitosamente a: $new_dom${NC}"
-    else echo -e "\n${RED}Acción cancelada.${NC}"; fi
+
+    if [ -z "$new_dom" ]; then echo -e "\n${RED}Acción cancelada.${NC}"; pause_return; return; fi
+    if [ "$new_dom" = "$current_dom" ]; then echo -e "\n${RED}Es el mismo dominio/IP, sin cambios.${NC}"; pause_return; return; fi
+
+    SERVER_IP=$(curl -4 -s --max-time 2 ipv4.icanhazip.com || hostname -I | awk '{print $1}')
+
+    if [[ "$new_dom" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "\n${YELLOW}Generando certificado autofirmado para la IP $new_dom...${NC}"
+        systemctl stop xray 2>/dev/null || true
+        openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+          -keyout /etc/xray/xray.key \
+          -out /etc/xray/xray.crt \
+          -subj "/CN=${new_dom}/O=HexTunnel/C=US"
+        echo "selfsigned" > /etc/xray/cert_type
+        rm -f /etc/cron.d/certbot-renew
+        NEW_CERT_TYPE="selfsigned"
+    else
+        echo -e "\n${YELLOW}Verificando que $new_dom resuelva a $SERVER_IP...${NC}"
+        command -v dig >/dev/null 2>&1 || apt-get install -y dnsutils >/dev/null 2>&1
+        DOMAIN_IP=$(dig +short "$new_dom" @8.8.8.8 | tail -1)
+        if [ "$DOMAIN_IP" != "$SERVER_IP" ]; then
+            echo -e "\n${RED}✘ ERROR: $new_dom no apunta a $SERVER_IP todavía.${NC}"
+            echo -e "  Crea/corrige el registro A en tu DNS y vuelve a intentar. No se cambió nada."
+            pause_return; return
+        fi
+        echo -e "${GREEN}Dominio verificado. Solicitando certificado Let's Encrypt...${NC}"
+        command -v certbot >/dev/null 2>&1 || apt-get install -y certbot >/dev/null 2>&1
+        systemctl stop xray 2>/dev/null || true
+        systemctl stop nginx 2>/dev/null || true
+        if ! certbot certonly --standalone --non-interactive --agree-tos --email "admin@${new_dom}" -d "${new_dom}"; then
+            echo -e "\n${RED}✘ Falló la emisión del certificado Let's Encrypt. No se cambió el dominio.${NC}"
+            systemctl start xray 2>/dev/null || true
+            pause_return; return
+        fi
+        cp "/etc/letsencrypt/live/${new_dom}/fullchain.pem" /etc/xray/xray.crt
+        cp "/etc/letsencrypt/live/${new_dom}/privkey.pem" /etc/xray/xray.key
+        echo "letsencrypt" > /etc/xray/cert_type
+        NEW_CERT_TYPE="letsencrypt"
+
+        mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+        cat <<'EOF_RENEW' > /etc/letsencrypt/renewal-hooks/deploy/hex-tunnel.sh
+#!/bin/bash
+set -e
+for domain in $RENEWED_DOMAINS; do
+    cp /etc/letsencrypt/live/$domain/fullchain.pem /etc/xray/xray.crt
+    cp /etc/letsencrypt/live/$domain/privkey.pem /etc/xray/xray.key
+    cat /etc/letsencrypt/live/$domain/privkey.pem /etc/letsencrypt/live/$domain/fullchain.pem > /etc/stunnel/stunnel.pem
+    chmod 600 /etc/stunnel/stunnel.pem /etc/xray/xray.key
+    chmod 644 /etc/xray/xray.crt
+    systemctl restart xray stunnel4
+    break
+done
+EOF_RENEW
+        chmod +x /etc/letsencrypt/renewal-hooks/deploy/hex-tunnel.sh
+        echo "0 3 * * * root certbot renew --quiet --deploy-hook /etc/letsencrypt/renewal-hooks/deploy/hex-tunnel.sh" > /etc/cron.d/certbot-renew
+    fi
+
+    chmod 644 /etc/xray/xray.crt
+    chmod 600 /etc/xray/xray.key
+    cat /etc/xray/xray.key /etc/xray/xray.crt > /etc/stunnel/stunnel.pem
+    chmod 600 /etc/stunnel/stunnel.pem
+    chown root:root /etc/stunnel/stunnel.pem
+
+    echo "$new_dom" > /etc/deekayvpn/domain.txt
+    DOMAIN="$new_dom"
+
+    systemctl start xray 2>/dev/null || true
+    if ! /usr/local/bin/xray run -test -config /etc/xray/config.json >/dev/null 2>&1; then
+        echo -e "\n${RED}✘ Advertencia: el nuevo certificado no pasó la validación de Xray.${NC}"
+    fi
+    systemctl restart xray stunnel4 2>/dev/null || true
+    systemctl restart nginx 2>/dev/null || true
+
+    echo -e "\n${GREEN}✔ Dominio actualizado a: $new_dom${NC}"
+    echo -e "${GREEN}✔ Certificado regenerado (${NEW_CERT_TYPE}) y Xray/Stunnel reiniciados.${NC}"
+    echo -e "${YELLOW}Nota: los enlaces vless/vmess/trojan que ya diste a usuarios usaban el dominio/cert${NC}"
+    echo -e "${YELLOW}anterior. Genera enlaces nuevos desde el menú de Xray (opción 4, Mostrar Enlaces).${NC}"
     pause_return
 }
 
@@ -2186,6 +2466,8 @@ change_slipstream() {
     pause_return
 }
 
+# Instala SlipStream + Dante SOCKS + dnsdist en un servidor donde ya corre SlowDNS.
+# Mueve SlowDNS del puerto 53 público a uno interno y pone dnsdist al frente como multiplexor.
 install_slipstream() {
     clear
     echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
@@ -2363,6 +2645,7 @@ change_banner() {
     pause_return
 }
 
+# --- Advanced / Danger Zone ---
 advanced_menu() {
   while true; do
     clear
@@ -2427,7 +2710,7 @@ remove_script() {
   pause_return
 }
 
-# Main Dashboard (unchanged)
+# --- Main Dashboard ---
 draw_header() {
   local os_name=$(. /etc/os-release 2>/dev/null; echo "${ID:-UNKNOWN}" | tr '[:lower:]' '[:upper:]')
   local os_ver=$(. /etc/os-release 2>/dev/null; echo "${VERSION_ID:-}")
@@ -2511,19 +2794,18 @@ while true; do
 done
 EOF_MENU
 
-# Symlink menu
+sed -i "s|DOMAIN_PLACEHOLDER|$DOMAIN|g" /usr/local/bin/menu
 chmod +x /usr/local/bin/menu
 cp /usr/local/bin/menu /usr/bin/menu
 cp /usr/local/bin/menu /usr/bin/Menu
 
-# LET'S ENCRYPT RENEWAL HOOK (only if using Let's Encrypt)
+# LET'S ENCRYPT RENEWAL HOOK (solo si se usó Let's Encrypt)
 if [ "$USE_LETSENCRYPT" = true ]; then
     mkdir -p /etc/letsencrypt/renewal-hooks/deploy
     cat <<'EOF_RENEW' > /etc/letsencrypt/renewal-hooks/deploy/hex-tunnel.sh
 #!/bin/bash
 set -e
 for domain in $RENEWED_DOMAINS; do
-    # Update paths for Xray and Stunnel
     cp /etc/letsencrypt/live/$domain/fullchain.pem /etc/xray/xray.crt
     cp /etc/letsencrypt/live/$domain/privkey.pem /etc/xray/xray.key
     cat /etc/letsencrypt/live/$domain/privkey.pem /etc/letsencrypt/live/$domain/fullchain.pem > /etc/stunnel/stunnel.pem
