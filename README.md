@@ -4,7 +4,7 @@ Elige uno de los siguientes métodos:
 
 Esta Script Fue Editada Y Mejorada Por Jotchua Devz
 
-SSH/V2RAY/SLOWDNS/HYSTERIA AUTOSCRIPT VPS
+SSH/V2RAY/SLOWDNS/HYSTERIA V1 - V2 AUTOSCRIPT VPS
 
 **Opción 1:**
 ```bash
@@ -23,7 +23,7 @@ bash <(curl -sL https://raw.githubusercontent.com/JotchuaDevz/Porno-OS/refs/head
 
 **Opción 4 (Recomendada):**
 ```wget
-wget -qO install.sh https://raw.githubusercontent.com/JotchuaDevz/Porno-OS/refs/heads/main/install.sh chmod +x install.sh ./install.sh
+wget -qO install.sh https://raw.githubusercontent.com/JotchuaDevz/Porno-OS/refs/heads/main/install.sh; chmod +x install.sh; ./install.sh
 ```
 
 ---
