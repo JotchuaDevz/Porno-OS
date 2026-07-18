@@ -162,7 +162,7 @@ PACKAGE_LIST=(
   neofetch sslh dnsutils stunnel4 squid nano sudo wget unzip tar zip gzip
   iptables iptables-persistent netfilter-persistent bc cron dos2unix whois screen ruby
   apt-transport-https software-properties-common gnupg2 ca-certificates curl net-tools 
-  nginx certbot jq figlet git gcc make build-essential perl expect libdbi-perl vnstat socat
+  nginx haproxy certbot jq figlet git gcc make build-essential perl expect libdbi-perl vnstat socat
   libnet-ssleay-perl libauthen-pam-perl libio-pty-perl apt-show-versions openssh-server rsyslog lsof procps
   cmake pkg-config libssl-dev dante-server dnsdist
 )
@@ -1302,7 +1302,7 @@ case "$(uname -m)" in
   *) echo "Unsupported Hysteria 2 architecture: $(uname -m)"; exit 1 ;;
 esac
 
-HYSTERIA2_RELEASE_URL="https://github.com/apernet/hysteria/releases/download/${HYSTERIA2_VER/\//%2F}"
+HYSTERIA2_RELEASE_URL="https://github.com/apernet/hysteria/releases/download/${HYSTERIA2_VER}"
 hyst2_tmp=$(mktemp -d /tmp/hysteria2-install.XXXXXX) || exit 1
 if ! curl -fL --retry 3 -o "$hyst2_tmp/$HYSTERIA2_ASSET" "$HYSTERIA2_RELEASE_URL/$HYSTERIA2_ASSET" ||
    ! curl -fL --retry 3 -o "$hyst2_tmp/hashes.txt" "$HYSTERIA2_RELEASE_URL/hashes.txt"; then
@@ -1399,6 +1399,7 @@ iptables -C INPUT -p udp --dport 53 -j ACCEPT 2>/dev/null || iptables -I INPUT -
 # Keep Hysteria 2 out of the broad Hysteria 1 DNAT range.
 # This exemption must remain ahead of all range/catch-all DNAT rules.
 iptables -t nat -C PREROUTING -p udp --dport 36713 -j ACCEPT 2>/dev/null || iptables -t nat -I PREROUTING 1 -p udp --dport 36713 -j ACCEPT
+iptables -C INPUT -p udp --dport 36713 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 36713 -j ACCEPT
 
 IFACE=$(ip -4 route ls|grep default|grep -Po '(?<=dev )(\S+)'|head -1)
 iptables -t nat -C PREROUTING -i "$IFACE" -p udp --dport 20000:50000 -j DNAT --to-destination :36712 2>/dev/null || iptables -t nat -A PREROUTING -i "$IFACE" -p udp --dport 20000:50000 -j DNAT --to-destination :36712
