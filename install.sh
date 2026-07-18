@@ -460,17 +460,14 @@ cat <<EOF > /etc/xray/config.json
         "clients": [],
         "decryption": "none",
         "fallbacks": [
-          { "path": "/xhttp", "dest": 10004, "xver": 2 },
           { "path": "/httpupgrade", "dest": 10005, "xver": 2 },
           { "path": "/vless-tcp", "dest": 10007, "xver": 2 },
-          { "path": "/vmess-xhttp", "dest": 10010, "xver": 2 },
           { "path": "/vmess-hup", "dest": 10011, "xver": 2 },
           { "path": "/vmess-tcp", "dest": 10008, "xver": 2 },
-          { "path": "/vmess-grpc-svc", "dest": 10012, "xver": 2 },
           { "path": "/trojan", "dest": 10013, "xver": 2 },
           { "path": "/vless", "dest": 10003, "xver": 2 },
           { "path": "/vmess", "dest": 10009, "xver": 2 },
-          { "alpn": "h2", "dest": 10006, "xver": 2 },
+          { "alpn": "h2", "dest": 10444, "xver": 2 },
           { "dest": 666 }
         ]
       },
@@ -803,11 +800,12 @@ systemctl enable "$HAPROXY_SERVICE"
 systemctl restart "$HAPROXY_SERVICE"
 fi
 
-# Internal-only HTTP/2 router. OBSOLETO: desde que el fallback ALPN "h2" en
-# vless-tls-dispatcher apunta directo a 127.0.0.1:10006, Xray ya no necesita
-# este salto por HAProxy. Se deja deshabilitado para no reactivar un servicio
-# que el script ya apagó (systemctl disable --now haproxy) más arriba.
-if false; then
+# Internal-only HTTP/2 router. Xray termina la TLS/ALPN en el 443 y, para
+# cualquier conexión que negocie ALPN=h2 (gRPC y XHTTP de VLESS/VMess, que
+# viajan como HTTP/2 real y NO pueden repartirse por "path" en el fallback
+# nativo de Xray -- ver https://github.com/XTLS/Xray-core/issues/3493),
+# la reenvía aquí. HAProxy sí sabe parsear HTTP/2 de verdad y reparte por
+# :path hacia el inbound interno de Xray que corresponda.
 cat <<'EOF_H2_ROUTER' > /etc/haproxy/haproxy.cfg
 global
     log /dev/log local0
@@ -827,16 +825,26 @@ frontend xray_h2_router
     bind 127.0.0.1:10444 accept-proxy proto h2
     mode http
     use_backend vless_grpc_h2 if { path_beg /grpc-svc/ }
+    use_backend vmess_grpc_h2 if { path_beg /vmess-grpc-svc/ }
     use_backend vless_xhttp_h2 if { path_beg /xhttp }
+    use_backend vmess_xhttp_h2 if { path_beg /vmess-xhttp }
     default_backend reject_h2
 
 backend vless_grpc_h2
     mode http
     server xray 127.0.0.1:10006 send-proxy-v2 proto h2
 
+backend vmess_grpc_h2
+    mode http
+    server xray 127.0.0.1:10012 send-proxy-v2 proto h2
+
 backend vless_xhttp_h2
     mode http
     server xray 127.0.0.1:10004 send-proxy-v2 proto h2
+
+backend vmess_xhttp_h2
+    mode http
+    server xray 127.0.0.1:10010 send-proxy-v2 proto h2
 
 backend reject_h2
     mode http
@@ -856,7 +864,6 @@ EOF_H2_UNIT
 systemctl daemon-reload
 systemctl enable haproxy
 systemctl restart haproxy
-fi
 
 # USER EXPIRY CRONJOB FOR XRAY
 cat <<'EOF_EXP' > /usr/local/bin/exp-check
@@ -1884,7 +1891,7 @@ add_xray() {
     echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
     echo -e "Usuario: $user\nExpira: $exp"
       echo -e "\n${YELLOW}[ VMESS TLS / PORT 443 ]${NC}"
-VMESS_TCP_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-TCP\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"/vmess-tcp\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
+VMESS_TCP_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-TCP\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"http\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-tcp\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
 echo -e "TCP:        vmess://$(echo -n "$VMESS_TCP_JSON" | base64 -w 0)"
 VMESS_WS_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-WS\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
 echo -e "WS:         vmess://$(echo -n "$VMESS_WS_JSON" | base64 -w 0)"
@@ -1949,7 +1956,7 @@ echo -e "HTTPUp:     vmess://$(echo -n "$VMESS_NHUP_JSON" | base64 -w 0)"
   echo -e "HUP: vless://${uuid}@${DOMAIN}:80?type=httpupgrade&security=none&encryption=none&path=%2Fhttpupgrade&host=${DOMAIN}#${user}-VLESS-NTLS-HTTPUp\n"
 
   echo -e "\n${YELLOW}[ VMESS TLS / PORT 443 ]${NC}"
-VMESS_TCP_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-TCP\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"none\",\"host\":\"\",\"path\":\"/vmess-tcp\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
+VMESS_TCP_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-TCP\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"tcp\",\"type\":\"http\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess-tcp\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
 echo -e "TCP:        vmess://$(echo -n "$VMESS_TCP_JSON" | base64 -w 0)"
 VMESS_WS_JSON="{\"v\":\"2\",\"ps\":\"${user}-TLS-WS\",\"add\":\"${DOMAIN}\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${DOMAIN}\",\"path\":\"/vmess\",\"tls\":\"tls\",\"sni\":\"${DOMAIN}\"}"
 echo -e "WS:         vmess://$(echo -n "$VMESS_WS_JSON" | base64 -w 0)"
