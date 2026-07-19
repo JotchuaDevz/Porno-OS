@@ -1,4 +1,10 @@
 #!/bin/bash
+#
+# Copyright (c) 2026 Hex Applications. Todos los derechos reservados.
+# Uso permitido según LICENSE. Prohibida la copia, modificación o
+# redistribución de este script sin autorización previa y por escrito
+# de Hex Applications.
+#
 set -o pipefail
 
 #by JotchuaDevz
