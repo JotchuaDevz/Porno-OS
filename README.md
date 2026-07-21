@@ -4,7 +4,7 @@ Elige uno de los siguientes métodos:
 
 Esta Script Fue Editada Y Mejorada Por Jotchua Devz
 
-SSH/V2RAY/SLOWDNS/HYSTERIA V1 - V2 AUTOSCRIPT VPS
+SSH/V2RAY/SLOWDNS/HYSTERIA 1|2/ZIVPN/UDP CUSTOM/SLIPSTREAM AUTOSCRIPT VPS
 
 **Opción 1:**
 ```bash
@@ -28,6 +28,8 @@ wget -qO install.sh https://raw.githubusercontent.com/JotchuaDevz/Porno-OS/refs/
 
 ---
 
+# UNETE
+https://t.me/RequestLab_X_Canal
 # WARP
 
 ### Checar estado
