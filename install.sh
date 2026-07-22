@@ -6,11 +6,8 @@
 # de Hex Applications.
 #
 set -o pipefail
-
-#by JotchuaDevz
 clear
 
-# Initializing Server
 export DEBIAN_FRONTEND=noninteractive
 source /etc/os-release
 
@@ -25,7 +22,8 @@ case "$ID:$VERSION_ID" in
 esac
 
 echo "============================================================"
-echo "              Instalador de Script SSH Hex Tunnel"
+echo "              Instalador de Script SSH Hex Auto"
+echo "        (AutoScript: SSH/Xray/Hysteria/ZiVPN/UDP Custom)"
 echo "============================================================"
 echo ""
 echo "Sistemas Operativos Soportados:"
@@ -45,15 +43,9 @@ if [ "$SUPPORT_LEVEL" = "unsupported" ]; then
   exit 1
 fi
 
-#Script Variables
 read -p "Ingresa tu Dominio/Subdominio para Xray (o presiona enter para usar la IP): " -e -i "$(curl -4 -s --max-time 2 ipv4.icanhazip.com || hostname -I | awk '{print $1}')" DOMAIN
 export DOMAIN
 
-#### BEGIN LET'S ENCRYPT / SELF-SIGNED CERTIFICATE HANDLING ####
-# Bootstrap mínimo: dig (dnsutils) y certbot deben existir ANTES de usarse aquí.
-# El apt-get update/upgrade grande y la lista completa de paquetes vienen más
-# adelante en el script; sin este bootstrap, 'dig' y 'certbot' fallarían en un
-# VPS recién creado que aún no tiene el índice de apt actualizado.
 apt-get update -y >/dev/null 2>&1
 command -v dig >/dev/null 2>&1 || apt-get install -y dnsutils >/dev/null 2>&1
 command -v certbot >/dev/null 2>&1 || apt-get install -y certbot >/dev/null 2>&1
@@ -102,36 +94,26 @@ mkdir -p /etc/stunnel
 cat /etc/xray/xray.key /etc/xray/xray.crt > /etc/stunnel/stunnel.pem
 chmod 600 /etc/stunnel/stunnel.pem
 chown root:root /etc/stunnel/stunnel.pem
-#### END LET'S ENCRYPT / SELF-SIGNED CERTIFICATE HANDLING ####
 
-# OpenSSH Ports
 SSH_Port1='22'
 SSH_Port2='299'
 
-# Stunnel Ports (Internal Fallback)
 Stunnel_Port='127.0.0.1:4443'
 Stunnel_Port_Num='4443' 
 
-# Squid Ports
 Squid_Port1='3128'
 Squid_Port2='8000'
 
-# Node.js Socks Proxy (Isolated Ports)
 WsPorts=('10080' '25' '2082' '2086')  
 WsPort='10080'  
 
-# SSLH Port
 MainPort='666' 
 
-# SSH SlowDNS
 read -p "Ingresa el Nameserver de SlowDNS (o presiona enter para el predeterminado): " -e -i "ns-miami.hexapps.app" Nameserver
 Serverkey='819d82813183e4be3ca1ad74387e47c0c993b81c601b2d1473a3f47731c404ae'
 Serverpub='7fbd1f8aa0abfe15a7903e837f78aba39cf61d36f183bd604daa2fe4ef3b7b59'
 
-# SlowDNS ahora escucha en un puerto interno; dnsdist toma el 53 público y multiplexa
 SlowDNS_Internal_Port='5301'
-
-# SlipStream (segundo túnel DNS, multiplexado junto a SlowDNS vía dnsdist) — OPCIONAL
 read -p "¿Deseas instalar SlipStream (túnel DNS adicional)? [y/N]: " -e -i "N" _install_slipstream
 if [[ "$_install_slipstream" =~ ^[Yy]$ ]]; then
     InstallSlipstream="y"
@@ -153,16 +135,17 @@ Slipstream_Internal_Port='5300'
 SlipstreamSocksPort='1080'
 DnsdistConf='/etc/dnsdist/dnsdist.conf'
 
-# UDP HYSTERIA | UDP PORT | OBFS | PASSWORDS
 UDP_PORT=":36712"
 HYST2_PORT="36713"
+UDP_CUSTOM_PORT="36717"
+ZIVPN_PORT="5667"
 _default_obfs='HexTunnel'
 _default_password='HexTunnel'
 
 if [ -t 0 ]; then
-  read -e -p "Ingresa la cadena de ofuscación de Hysteria (obfs) [${_default_obfs}]: " -i "${_default_obfs}" _input_obfs
+  read -e -p "Ingresa Hysteria/ZiVPN Obfuscation (obfs) [${_default_obfs}]: " -i "${_default_obfs}" _input_obfs
   OBFS="${_input_obfs:-${_default_obfs}}"
-  read -e -p "Ingresa la contraseña de Hysteria [${_default_password}]: " -i "${_default_password}" _input_pass
+  read -e -p "Ingresa la contraseña predeterminada para UDP [${_default_password}]: " -i "${_default_password}" _input_pass
   PASSWORD="${_input_pass:-${_default_password}}"
 else
   OBFS="${OBFS:-${_default_obfs}}"
@@ -171,17 +154,12 @@ fi
 
 export OBFS PASSWORD
 
-# WebServer Ports
 Nginx_Port='85' 
-
-# DNS Resolver cloudflare dns
 Dns_1='1.1.1.1' 
 Dns_2='1.0.0.1'
 
-# Server local time
 MyVPS_Time='Africa/Accra'
 
-# Telegram IDs
 My_Chat_ID='344472672'
 My_Bot_Key='8715170470:AAE8urT5fSWdZ_xgkwwZivN4kgHW9nBVxgY'
 
@@ -270,7 +248,6 @@ cat <<'deekay77' > /etc/zorro-luffy
 <font color="red">• BROUGHT TO YOU BY <br></font><font color="#00cccc">https://t.me/RequestLab_X_Canal !<br></font>
 deekay77
 
-# OpenSSH
 rm -f /etc/ssh/sshd_config
 cat <<'MySSHConfig' > /etc/ssh/sshd_config
 Port myPORT1
@@ -308,7 +285,6 @@ sed -i '/\/usr\/sbin\/nologin/d' /etc/shells
 echo '/bin/false' >> /etc/shells; echo '/usr/sbin/nologin' >> /etc/shells
 systemctl restart "$SSH_SERVICE"
 
-# SSLH
 cd /etc/default/
 cat << sslh > /etc/default/sslh
 RUN=yes
@@ -319,7 +295,6 @@ mkdir -p /var/run/sslh; touch /var/run/sslh/sslh.pid; chmod 777 /var/run/sslh/ss
 systemctl daemon-reload; systemctl enable "$SSLH_SERVICE"; systemctl restart "$SSLH_SERVICE"
 cd
 
-# Stunnel
 StunnelDir=$(ls /etc/default | grep stunnel | head -n1)
 cat <<'MyStunnelD' > /etc/default/$StunnelDir
 ENABLED=1
@@ -349,7 +324,6 @@ sed -i "s|Stunnel_Port|$Stunnel_Port|g" /etc/stunnel/stunnel.conf
 sed -i "s|MainPort|$MainPort|g" /etc/stunnel/stunnel.conf
 systemctl enable "$STUNNEL_SERVICE"; systemctl restart "$STUNNEL_SERVICE"
 
-# Node.js Socks Proxy (Isolated Multi-Process)
 loc=/etc/socksproxy; mkdir -p $loc; apt-get install -y nodejs
 
 cat <<EOF > $loc/proxy.js
@@ -396,7 +370,6 @@ service
 systemctl daemon-reload
 for port in "${WsPorts[@]}"; do systemctl enable ws-proxy@$port; systemctl restart ws-proxy@$port; done
 
-# === XRAY CORE ===
 echo "Installing Hiddify-aligned stable Xray Core v26.3.27..."
 XRAY_VER="v26.3.27"
 
@@ -452,8 +425,6 @@ chmod 600 /etc/xray/vless.txt
 } > /etc/xray/server.env
 chmod 600 /etc/xray/server.env
 
-# XRAY CONFIGURATION
-# Xray terminates TLS directly on 443 and dispatches transports by ALPN/path.
 cat <<EOF > /etc/xray/config.json
 {
   "log": { "access": "none", "error": "/var/log/xray/error.log", "loglevel": "error" },
@@ -688,9 +659,7 @@ systemctl disable --now haproxy 2>/dev/null || true
 systemctl enable xray
 systemctl restart xray
 
-# === LEGACY HAPROXY CONFIGURATION (disabled; Xray owns port 443) ===
 if false; then
-# HAProxy terminates TLS once and dispatches VLESS by HTTP path or ALPN.
 mkdir -p /etc/haproxy/certs
 install -m 600 /etc/stunnel/stunnel.pem /etc/haproxy/certs/xray.pem
 cat <<EOF_HAPROXY > /etc/haproxy/haproxy.cfg
@@ -969,6 +938,28 @@ fi
 EOF_HYST2_EXP
 chmod 755 /usr/local/bin/hysteria2-exp
 echo "5 0 * * * root /usr/local/bin/hysteria2-exp >/dev/null 2>&1" > /etc/cron.d/hysteria2-expiry
+
+# USER EXPIRY CRONJOB FOR ZIVPN
+cat <<'EOF_ZIVPN_EXP' > /usr/local/bin/zivpn-exp
+#!/bin/bash
+now=$(date +%Y-%m-%d)
+ZIVPN_USER_DB="/etc/zivpn/users.txt"
+ZIVPN_CONFIG="/etc/zivpn/config.json"
+changed=0
+if [ -f "$ZIVPN_USER_DB" ]; then
+  mapfile -t expired_users < <(awk -v d="$now" '$2 < d {print $1}' "$ZIVPN_USER_DB")
+  for user in "${expired_users[@]}"; do
+    jq ".auth.config |= map(select(. != \"$user\"))" "$ZIVPN_CONFIG" > /tmp/z.json && mv /tmp/z.json "$ZIVPN_CONFIG"
+    sed -i "/^$user /d" "$ZIVPN_USER_DB"
+    changed=1
+  done
+  if [ "$changed" -eq 1 ]; then
+    systemctl restart zivpn.service
+  fi
+fi
+EOF_ZIVPN_EXP
+chmod +x /usr/local/bin/zivpn-exp
+echo "0 0 * * * root /usr/local/bin/zivpn-exp >/dev/null 2>&1" > /etc/cron.d/zivpn-expiry
 
 # Nginx & Squid
 rm -rf /home/vps/public_html /etc/nginx/sites-* /etc/nginx/nginx.conf; mkdir -p /home/vps/public_html
@@ -1519,7 +1510,7 @@ WantedBy=multi-user.target
 deekayx
 chmod +x /etc/deekaystartup; systemctl enable deekaystartup
 
-# BadVPN Binary
+# BadVPN Binary (Provides 127.0.0.1:7300 upstream for UDP Custom)
 if [ "$(getconf LONG_BIT)" == "64" ]; then
  wget -q -O /usr/bin/badvpn-udpgw "https://www.dropbox.com/s/jo6qznzwbsf1xhi/badvpn-udpgw64"
 else
@@ -1533,11 +1524,98 @@ Description=badvpn tun2socks service
 After=network.target
 [Service]
 Type=simple
-ExecStart=/usr/bin/badvpn-udpgw --listen-addr 127.0.0.1:7300 --max-clients 1000 --max-connections-for-client 10
+ExecStart=/usr/bin/badvpn-udpgw --loglevel none --listen-addr 127.0.0.1:7300 --max-clients 1000 --max-connections-for-client 10
 [Install]
 WantedBy=multi-user.target
 deekayb
 systemctl enable badvpn; systemctl start badvpn
+
+# === UDP CUSTOM (Port 36717) ===
+echo "Installing UDP Custom..."
+mkdir -p /root/udp
+wget -q -O /root/udp/udp-custom "https://raw.githubusercontent.com/mahpud896/UDP-Custom/main/bin/udp-custom-linux-amd64" || true
+chmod +x /root/udp/udp-custom 2>/dev/null || true
+wget -q -O /root/udp/config.json "https://raw.githubusercontent.com/mahpud896/UDP-Custom/main/config/config.json" || true
+sed -i "s/\":36712\"/\":36717\"/g" /root/udp/config.json 2>/dev/null || true
+chmod 644 /root/udp/config.json 2>/dev/null || true
+
+cat > /etc/systemd/system/udp-custom.service <<EOF
+[Unit]
+Description=UDP Custom Proxy
+After=network.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/udp
+ExecStart=/root/udp/udp-custom server -c /root/udp/config.json
+Restart=always
+RestartSec=2s
+LimitNOFILE=1048576
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload; systemctl enable udp-custom; systemctl start udp-custom 2>/dev/null || true
+
+# === ZIVPN (Port 5667) ===
+echo "Instalando ZiVPN..."
+mkdir -p /etc/zivpn
+wget -q -O /usr/local/bin/zivpn "https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9/udp-zivpn-linux-amd64" || true
+chmod +x /usr/local/bin/zivpn 2>/dev/null || true
+cp /etc/hysteria/hysteria.crt /etc/zivpn/zivpn.crt 2>/dev/null || true
+cp /etc/hysteria/hysteria.key /etc/zivpn/zivpn.key 2>/dev/null || true
+chmod 644 /etc/zivpn/zivpn.crt /etc/zivpn/zivpn.key 2>/dev/null || true
+
+cat > /etc/zivpn/config.json <<EOF
+{
+  "listen": ":5667",
+   "cert": "/etc/zivpn/zivpn.crt",
+   "key": "/etc/zivpn/zivpn.key",
+   "obfs": "hu\`\`hqb\`c",
+   "auth": {
+    "mode": "passwords", 
+    "config": ["$PASSWORD"]
+  }
+}
+EOF
+chmod 644 /etc/zivpn/config.json
+echo "$PASSWORD $(date -d "+365 days" +"%Y-%m-%d")" > /etc/zivpn/users.txt
+
+cat > /etc/systemd/system/zivpn.service <<EOF
+[Unit]
+Description=zivpn VPN Server
+After=network.target
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/etc/zivpn
+ExecStart=/usr/local/bin/zivpn server -c /etc/zivpn/config.json
+Restart=always
+RestartSec=3
+Environment=ZIVPN_LOG_LEVEL=info
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=true
+LimitNOFILE=1048576
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/zivpn-nat.service <<EOF
+[Unit]
+Description=Restore ZiVPN UDP NAT rules
+After=network-online.target
+Wants=network-online.target
+Before=zivpn.service
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'IFACE=\$(ip -4 route ls|grep default|grep -Po "(?<=dev )(\\\\S+)"|head -1); [ -n "\$IFACE" ] && (iptables -t nat -C PREROUTING -i "\$IFACE" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 2>/dev/null || iptables -t nat -A PREROUTING -i "\$IFACE" -p udp --dport 6000:19999 -j DNAT --to-destination :5667)'
+ExecStart=/bin/bash -c 'iptables -C INPUT -p udp --dport 5667 -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport 5667 -j ACCEPT'
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload; systemctl enable zivpn.service; systemctl start zivpn.service 2>/dev/null || true
+systemctl enable zivpn-nat.service; systemctl start zivpn-nat.service 2>/dev/null || true
 
 # VNSTAT INITIALIZATION
 IFACE="$(ip -4 route ls|grep default|grep -Po '(?<=dev )(\S+)'|head -1)"
@@ -1584,6 +1662,8 @@ HYST2_CONFIG="/etc/hysteria2/config.json"
 HYST2_USER_DB="/etc/hysteria2/users.txt"
 HYST2_PORT="${HYST2_PORT:-36713}"
 touch "$HYST2_USER_DB" 2>/dev/null || true
+ZIVPN_CONFIG="/etc/zivpn/config.json"
+ZIVPN_USER_DB="/etc/zivpn/users.txt"
 
 # --- Utility Functions ---
 server_ip() { curl -4 -s --max-time 2 ipv4.icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}'; }
@@ -1601,6 +1681,104 @@ server_status() {
   [ "$ok" -ge 4 ] && echo -e "${GREEN}EN LÍNEA${NC}" || echo -e "${RED}PROBLEMAS DETECTADOS${NC}"
 }
 pause_return() { echo; read -rp "Presiona ENTER para volver... " _; }
+
+# --- ZIVPN MANAGEMENT FUNCTIONS ---
+add_zivpn() {
+    clear
+    echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+    echo -e "                 ${BOLD}CREAR USUARIO ZIVPN${NC}"
+    echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+    read -rp " Ingresa Contraseña: " new_pass
+    
+    if grep -qw "^$new_pass" "$ZIVPN_USER_DB" 2>/dev/null; then
+        echo -e "\n${RED}Error: Contraseña ya existe!${NC}"
+        pause_return; return
+    fi
+    read -rp " Validez (Dias): " days
+    if ! [[ "$days" =~ ^[0-9]+$ ]]; then echo -e "${RED}Numero Invalido.${NC}"; pause_return; return; fi
+    exp_date=$(date -d "+${days} days" +"%Y-%m-%d")
+    
+    jq ".auth.config += [\"$new_pass\"]" "$ZIVPN_CONFIG" > /tmp/z.json && mv /tmp/z.json "$ZIVPN_CONFIG"
+    echo "$new_pass $exp_date" >> "$ZIVPN_USER_DB"
+    systemctl restart zivpn.service
+    
+    OBFS_VAL=$(jq -r '.obfs' "$ZIVPN_CONFIG" 2>/dev/null || echo "hu``hqb`c")
+    
+    echo -e "\n${GREEN}✔ Usuario creado exitosamente!${NC}"
+    echo -e "${CYAN}--------------------------------------------------------------${NC}"
+    echo -e " ${BOLD}IP:${NC}          ${YELLOW}$(server_ip)${NC}"
+    echo -e " ${BOLD}Dominio:${NC}      ${YELLOW}${DOMAIN:-$(server_ip)}${NC}"
+    echo -e " ${BOLD}Puerto De Rango:${NC}  ${YELLOW}6000-19999${NC}"
+    echo -e " ${BOLD}Usuario (Contraseña):${NC} ${YELLOW}${new_pass}${NC}"
+    echo -e " ${BOLD}Fecha de Expiración:${NC} ${YELLOW}${exp_date}${NC}"
+    echo -e "${CYAN}--------------------------------------------------------------${NC}"
+    pause_return
+}
+
+del_zivpn() {
+    clear
+    echo -e "${RED}══════════════════════════════════════════════════════════════${NC}"
+    echo -e "                 ${BOLD}ELIMINAR USUARIO ZIVPN${NC}"
+    echo -e "${RED}══════════════════════════════════════════════════════════════${NC}"
+    if [ ! -s "$ZIVPN_USER_DB" ]; then echo -e "No Hay Usuarios."; pause_return; return; fi
+    cat -n "$ZIVPN_USER_DB" | awk '{print " ["$1"] User: "$2" | Exp: "$3}'
+    echo ""
+    read -rp " Ingrese el número de ID del usuario a eliminar: " del_id
+    if ! [[ "$del_id" =~ ^[0-9]+$ ]]; then echo -e "${RED}ID inválido.${NC}"; pause_return; return; fi
+
+    del_pass=$(sed -n "${del_id}p" "$ZIVPN_USER_DB" | awk '{print $1}')
+    if [ -z "$del_pass" ]; then echo -e "${RED}ID no encontrado.${NC}"; pause_return; return; fi
+    jq ".auth.config |= map(select(. != \"$del_pass\"))" "$ZIVPN_CONFIG" > /tmp/z.json && mv /tmp/z.json "$ZIVPN_CONFIG"
+    sed -i "${del_id}d" "$ZIVPN_USER_DB"
+    systemctl restart zivpn.service
+    echo -e "\n${GREEN}✔ Usuario '$del_pass' eliminado exitosamente!${NC}"
+    pause_return
+}
+
+extend_zivpn() {
+    clear
+      echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+      echo -e "                 ${BOLD}EXTENDER USUARIO ZIVPN${NC}"
+    echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+    if [ ! -s "$ZIVPN_USER_DB" ]; then echo -e "Usuarios No Encontrados."; pause_return; return; fi
+
+    cat -n "$ZIVPN_USER_DB" | awk '{print " ["$1"] User: "$2" | Exp: "$3}'
+    echo ""
+    read -rp " Ingrese el número de ID del usuario a extender: " ext_id
+    if ! [[ "$ext_id" =~ ^[0-9]+$ ]]; then echo -e "${RED}Número de ID inválido.${NC}"; pause_return; return; fi
+    
+    ext_pass=$(sed -n "${ext_id}p" "$ZIVPN_USER_DB" | awk '{print $1}')
+    current_exp=$(sed -n "${ext_id}p" "$ZIVPN_USER_DB" | awk '{print $2}')
+    if [ -z "$ext_pass" ]; then echo -e "${RED}ID No Encontrado.${NC}"; pause_return; return; fi
+  
+    read -rp " Agregar Validez (Dias): " days
+    if ! [[ "$days" =~ ^[0-9]+$ ]]; then echo -e "${RED}Numero Invalido.${NC}"; pause_return; return; fi
+    
+    new_exp=$(date -d "$current_exp + $days days" +"%Y-%m-%d")
+    sed -i "${ext_id}s/.*/$ext_pass $new_exp/" "$ZIVPN_USER_DB"
+    
+    echo -e "\n${GREEN}✔ Usuario '$ext_pass' Extendido Exitosamente!${NC}\n New Expiry: ${YELLOW}$new_exp${NC}"
+    pause_return
+}
+
+list_zivpn() {
+    clear
+    echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+    echo -e "                   ${BOLD}LISTA DE USUARIOS ZIVPN${NC}"
+    echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
+    if [ ! -s "$ZIVPN_USER_DB" ]; then echo -e "\n No Hay Usuarios En Linea.\n"
+    else
+        printf " %-5s | %-25s | %-15s\n" "ID" "PASSWORD" "EXPIRY DATE"
+        echo -e "${CYAN}--------------------------------------------------------------${NC}"
+        cat -n "$ZIVPN_USER_DB" | while read -r num user exp; do
+            printf " [%-3s] | %-25s | %-15s\n" "$num" "$user" "$exp"
+        done
+        echo -e "${CYAN}--------------------------------------------------------------${NC}"
+        echo -e " Total Usuarios Activos: ${YELLOW}$(wc -l < "$ZIVPN_USER_DB")${NC}"
+    fi
+    pause_return
+}
+
 
 # --- HYSTERIA MANAGEMENT FUNCTIONS ---
 add_hysteria() {
@@ -2133,6 +2311,7 @@ create_user() {
   echo -e "  WebSocket  : 80, 8080, 8880, 2082, 2086, 25"
   echo -e "  SlowDNS/SlipStream (dnsdist): 53"
   echo -e "  BadVPN     : 7300"
+  echo -e "  UDP Custom : 1-65535"
   echo -e "${CYAN}--------------------------------------------------------------${NC}"
   echo -e "  ${BOLD}Payload HTTP     :${NC}"
   echo -e "  ${YELLOW}GET / HTTP/1.1[crlf]Host: ${DOMAIN}[crlf]Connection: upgrade[crlf]Upgrade: websocket[crlf][crlf]${NC}"
@@ -2682,10 +2861,11 @@ advanced_menu() {
     echo -e "  [${YELLOW}02${NC}] Ver Logs de Acciones de Servicios (Journalctl)"
     echo -e "  [${YELLOW}03${NC}] Cambiar Dominio/IP del Servidor"
     echo -e "  [${YELLOW}04${NC}] Cambiar Nameserver de SlowDNS (NS)"
-    echo -e "  [${YELLOW}08${NC}] SlipStream (Instalar / Cambiar Dominio)"
+    echo -e "  [${RED}05${NC}] Desinstalar Script Completo (Peligro)"
     echo -e "  [${YELLOW}06${NC}] Cambiar Mensaje de Status (WS, HTML/Texto Libre)"
     echo -e "  [${YELLOW}07${NC}] Editar Banner (SSH / Stunnel)"
-    echo -e "  [${RED}05${NC}] Desinstalar Script Completo (Peligro)"
+    echo -e "  [${YELLOW}08${NC}] SlipStream (Instalar / Cambiar Dominio)"
+    echo -e "  [${YELLOW}09${NC}] Reiniciar UDP Core (SlowDNS/Hysteria/ZiVPN/UDP-Custom)"
     echo -e "  [${YELLOW}00${NC}] Atrás\n"
     read -rp "  Selecciona una opción: " opt
     case "$opt" in
@@ -2710,6 +2890,7 @@ advanced_menu() {
       8|08) change_slipstream ;;
       6|06) change_status ;;
       7|07) change_banner ;;
+      9|09) restart_service "server-sldns hysteria-server hysteria2-server badvpn udp-custom zivpn" "UDP Core Services"; pause_return ;;
       5|05) remove_script ;;
       0|00) break ;;
     esac
@@ -2751,7 +2932,7 @@ draw_header() {
   local buf=$(buffer_mem)
 
   echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}"
-  echo -e "${BLUE}       >>>>>  🐉  ${YELLOW}${BOLD}Hex Tunnel${NC}${BLUE}  ✸  ${YELLOW}${BOLD}Por JotchuaDevz${NC}${BLUE}  🐉  <<<<<${NC}"
+  echo -e "${BLUE}       >>>>>  🐉  ${YELLOW}${BOLD}Hex Auto${NC}${BLUE}  ✸  ${YELLOW}${BOLD}Por JotchuaDevz${NC}${BLUE}  🐉  <<<<<${NC}"
   echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}"
   printf "  ${WHITE}%-5s${NC} ${YELLOW}%-17s${NC} ${WHITE}%-6s${NC} ${YELLOW}%-14s${NC} ${WHITE}%-7s${NC} ${YELLOW}%s${NC}\n" "OS:" "$os" "Arch:" "$arch" "Cores:" "$cores"
   printf "  ${WHITE}%-5s${NC} ${YELLOW}%-17s${NC} ${WHITE}%-6s${NC} ${YELLOW}%-14s${NC} ${WHITE}%-7s${NC} %s\n" "IP:" "$ip" "Time:" "$time" "Status:" "$status"
@@ -2761,8 +2942,10 @@ draw_header() {
   printf "  ${WHITE}• %-12s${NC} ${GREEN}%-22s${NC} ${WHITE}• %-13s${NC} ${GREEN}%s${NC}\n" "SSL/PYTHON:" "443"  "Squid:" "3128, 8000"
   printf "  ${WHITE}• %-12s${NC} ${GREEN}%-22s${NC} ${WHITE}• %-13s${NC} ${GREEN}%s${NC}\n" "WS/PYTHON:" "80, 8080, 8880" "BadVPN:" "7300"
   printf "  ${WHITE}• %-12s${NC} ${GREEN}%-22s${NC} ${WHITE}• %-13s${NC} ${GREEN}%s${NC}\n" "WS/PYTHON:" "2082, 2086, 25" "XRAY NTLS:" "80, 8080, 8880"
-  printf "  ${WHITE}• %-12s${NC} ${GREEN}%-22s${NC} ${WHITE}• %-13s${NC} ${GREEN}%s${NC}\n" "XRAY TLS:" "443" "HysteriaUDP:" "20000-50000"
-  printf "  ${WHITE}• %-12s${NC} ${GREEN}%-22s${NC} ${WHITE}• %-13s${NC} ${GREEN}%s${NC}\n" "SlowDNS/SS:" "53 (dnsdist)" "SOCKS:" "127.0.0.1:1080"
+  printf "  ${WHITE}• %-12s${NC} ${GREEN}%-22s${NC} ${WHITE}• %-13s${NC} ${GREEN}%s${NC}\n" "XRAY TLS:" "443" "SlowDNS/SS:" "53 (dnsdist)"
+  printf "  ${WHITE}• %-12s${NC} ${GREEN}%-22s${NC} ${WHITE}• %-13s${NC} ${GREEN}%s${NC}\n" "SOCKS:" "127.0.0.1:1080" "Hysteria 1:" "20000-50000"
+  printf "  ${WHITE}• %-12s${NC} ${GREEN}%-22s${NC} ${WHITE}• %-13s${NC} ${GREEN}%s${NC}\n" "Hysteria 2:" "36713/UDP" "UDPCustom:" "1-65535"
+  printf "  ${WHITE}• %-12s${NC} ${GREEN}%-22s${NC} ${WHITE}• %-13s${NC} ${GREEN}%s${NC}\n" "ZiVPN:" "6000-19999"
   echo -e "${CYAN}----------------------- ${BOLD}Recursos Del Sistema${NC} ${CYAN}-----------------------${NC}"
   printf "  ${WHITE}%-10s${NC} ${YELLOW}%-14s${NC} ${WHITE}%-10s${NC} ${YELLOW}%-10s${NC} ${WHITE}%-8s${NC} ${YELLOW}%s${NC}\n" "RAM Usada:" "$ram" "CPU Usada:" "$cpu" "Buffer:" "$buf"
   echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}"
@@ -2774,6 +2957,7 @@ while true; do
   echo -e "  [${YELLOW}02${NC}] Gestión de Cuentas Xray (V2ray)"
   echo -e "  [${YELLOW}03${NC}] Gestión de Cuentas Hysteria (UDP)"
   echo -e "  [${YELLOW}04${NC}] Gestión de Cuentas Hysteria 2 (UDP)"
+  echo -e "  [${YELLOW}05${NC}] ZiVPN Account Management (UDP)"
   echo -e "  [${YELLOW}05${NC}] Monitorear Conexiones Activas"
   echo -e "  [${YELLOW}06${NC}] Control de Servicios (Reiniciar Protocolos)"
   echo -e "  [${YELLOW}07${NC}] Respaldar y Restaurar Datos"
@@ -2807,14 +2991,20 @@ while true; do
         echo -e "  [${YELLOW}1${NC}] Agregar Cuenta Hysteria 2\n  [${YELLOW}2${NC}] Renovar Cuenta Hysteria 2\n  [${YELLOW}3${NC}] Eliminar Cuenta Hysteria 2\n  [${YELLOW}4${NC}] Listar Todas Las Cuentas\n  [${YELLOW}5${NC}] Mostrar Enlace de Cuenta\n  [${YELLOW}0${NC}] Atrás\n"
         read -rp "  ► Opción: " sub; case "$sub" in 1) add_hysteria2;; 2) extend_hysteria2;; 3) del_hysteria2;; 4) list_hysteria2;; 5) show_hysteria2;; 0) break;; esac
       done ;;
-    5|05) online_users ;;
-    6|06) service_control_menu ;;
-    7|07)
+      5|05)
+      while true; do
+        clear; echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}\n                   ${BOLD}GESTION DE CUENTAS ZIVPN${NC}\n${CYAN}══════════════════════════════════════════════════════════════${NC}"
+        echo -e "  [${YELLOW}1${NC}] Agregar Cuenta ZiVPN\n  [${YELLOW}2${NC}] Renovar Cuenta ZiVPN\n  [${YELLOW}3${NC}] Eliminar Cuenta ZiVPN\n  [${YELLOW}4${NC}] Listar Todas Las Cuentas\n  [${YELLOW}0${NC}] Atrás\n"
+        read -rp "  ► Opción: " sub; case "$sub" in 1) add_zivpn;; 2) extend_zivpn;; 3) del_zivpn;; 4) list_zivpn;; 0) break;; esac
+      done ;;
+    6|06) online_users ;;
+    7|07) service_control_menu ;;
+    8|08)
       clear; echo -e "  [1] Respaldar Configuraciones del Sistema\n  [2] Restaurar Desde Respaldo\n  [0] Atrás"
       read -rp " Selecciona: " subopt; case "$subopt" in 1) backup_snapshot;; 2) restore_snapshot;; esac ;;
-    8|08) utilities_menu ;;
-    9|09) advanced_menu ;;
-    10) clear; read -rp "¿Reiniciar el servidor ahora? [y/N]: " ans; [[ "$ans" =~ ^[Yy]$ ]] && reboot ;;
+    9|09) utilities_menu ;;
+    10) advanced_menu ;;
+    11) clear; read -rp "¿Reiniciar el servidor ahora? [y/N]: " ans; [[ "$ans" =~ ^[Yy]$ ]] && reboot ;;
     0|00) clear; exit 0 ;;
   esac
 done
@@ -2848,7 +3038,7 @@ fi
 # Finishing
 chown -R www-data:www-data /home/vps/public_html
 clear
-figlet Hex Tunnel Script By JotchuaDevz -c | lolcat
+figlet Hex Auto Script By JotchuaDevz -c | lolcat
 echo "       ¡Instalación Completa! El sistema necesita reiniciarse para aplicar todos los cambios! "
 history -c; rm /root/full.sh 2>/dev/null || true
 echo "           ¡El servidor se reiniciará en 10 segundos! "
