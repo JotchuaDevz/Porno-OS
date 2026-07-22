@@ -1702,7 +1702,7 @@ add_zivpn() {
     echo "$new_pass $exp_date" >> "$ZIVPN_USER_DB"
     systemctl restart zivpn.service
     
-    OBFS_VAL=$(jq -r '.obfs' "$ZIVPN_CONFIG" 2>/dev/null || echo "hu``hqb`c")
+    OBFS_VAL=$(jq -r '.obfs' "$ZIVPN_CONFIG" 2>/dev/null || echo "hu\`\`hqb\`c")
     
     echo -e "\n${GREEN}✔ Usuario creado exitosamente!${NC}"
     echo -e "${CYAN}--------------------------------------------------------------${NC}"
