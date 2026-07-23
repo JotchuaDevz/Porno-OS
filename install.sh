@@ -281,7 +281,7 @@ MySSHConfig
 sed -i "s|myPORT1|$SSH_Port1|g" /etc/ssh/sshd_config
 sed -i "s|myPORT2|$SSH_Port2|g" /etc/ssh/sshd_config
 sed -i "s|SFTP_SUBSYSTEM|$SFTP_SUBSYSTEM|g" /etc/ssh/sshd_config
-sed -i '/password\s*requisite\s*pam_cracklib.s.*/d' /etc/pam.d/common-password
+sed -i -E '/password\s+(requisite|required)\s+pam_(cracklib|pwquality)\.so.*/d' /etc/pam.d/common-password
 sed -i 's/use_authtok //g' /etc/pam.d/common-password
 sed -i '/\/bin\/false/d' /etc/shells
 sed -i '/\/usr\/sbin\/nologin/d' /etc/shells
@@ -2374,7 +2374,7 @@ create_user() {
 
   IP=$(curl -s ipv4.icanhazip.com)
   CURRENT_NS=$(grep 'ExecStart=' /etc/systemd/system/server-sldns.service 2>/dev/null | sed 's/.*server\.key \([^ ]*\) .*/\1/')
-  
+
   clear
   echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
   echo -e "                   ${BOLD}CUENTA CREADA EXITOSAMENTE${NC}"
