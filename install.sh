@@ -248,6 +248,8 @@ cat <<'deekay77' > /etc/zorro-luffy
 <font color="red">• BROUGHT TO YOU BY <br></font><font color="#00cccc">https://t.me/RequestLab_X_Canal !<br></font>
 deekay77
 
+
+# OpenSSH
 rm -f /etc/ssh/sshd_config
 cat <<'MySSHConfig' > /etc/ssh/sshd_config
 Port myPORT1
@@ -258,8 +260,8 @@ HostKey /etc/ssh/ssh_host_rsa_key
 HostKey /etc/ssh/ssh_host_ecdsa_key
 HostKey /etc/ssh/ssh_host_ed25519_key
 PermitRootLogin yes
-MaxSessions 1024
-MaxStartups 200:30:400
+MaxSessions 5000
+MaxStartups 500:30:1000
 LoginGraceTime 30
 PubkeyAuthentication yes
 PasswordAuthentication yes
@@ -267,10 +269,11 @@ PermitEmptyPasswords no
 UsePAM yes
 X11Forwarding yes
 PrintMotd no
-ClientAliveInterval 300
-ClientAliveCountMax 2
+ClientAliveInterval 120
+ClientAliveCountMax 3
 UseDNS no
 Banner /etc/zorro-luffy
+LogLevel QUIET
 AcceptEnv LANG LC_*
 Subsystem sftp SFTP_SUBSYSTEM
 MySSHConfig
@@ -285,6 +288,7 @@ sed -i '/\/usr\/sbin\/nologin/d' /etc/shells
 echo '/bin/false' >> /etc/shells; echo '/usr/sbin/nologin' >> /etc/shells
 systemctl restart "$SSH_SERVICE"
 
+# SSLH
 cd /etc/default/
 cat << sslh > /etc/default/sslh
 RUN=yes
@@ -2318,7 +2322,7 @@ create_user() {
     user="$(echo -n "$user" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
     [ "$user" = "00" ] && return
     if [ -z "$user" ]; then echo -e "${RED}  Error: El usuario no puede estar vacío.${NC}\n"; continue; fi
-    if ! [[ "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then echo -e "${RED}  Error: Nombre inválido (minúsculas/números/guiones, sin espacios).${NC}\n"; continue; fi
+    if ! [[ "$user" =~ ^[a-zA-Z_][a-zA-Z0-9_-]{0,31}$ ]]; then echo -e "${RED}  Error: Nombre inválido (letras/números/guiones, sin espacios).${NC}\n"; continue; fi
     if id "$user" >/dev/null 2>&1; then echo -e "${RED}  Error: El usuario '$user' ya existe.${NC}\n"; continue; fi
     break
   done
@@ -2349,7 +2353,7 @@ create_user() {
     break
   done
 
-  ua_err=$(useradd -e "$(date -d "+$days days" +%Y-%m-%d)" -s /bin/false -M "$user" 2>&1 1>/dev/null)
+  ua_err=$(useradd --badname -e "$(date -d "+$days days" +%Y-%m-%d)" -s /bin/false -M "$user" 2>&1 1>/dev/null)
   if [ $? -ne 0 ]; then
     echo -e "\n${RED}  Error: No se pudo crear el usuario '$user'.${NC}"
     echo -e "  ${YELLOW}Detalle:${NC} ${ua_err:-desconocido}"
@@ -2370,7 +2374,7 @@ create_user() {
 
   IP=$(curl -s ipv4.icanhazip.com)
   CURRENT_NS=$(grep 'ExecStart=' /etc/systemd/system/server-sldns.service 2>/dev/null | sed 's/.*server\.key \([^ ]*\) .*/\1/')
-
+  
   clear
   echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
   echo -e "                   ${BOLD}CUENTA CREADA EXITOSAMENTE${NC}"
