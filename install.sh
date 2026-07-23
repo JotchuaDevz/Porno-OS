@@ -3040,12 +3040,12 @@ while true; do
   echo -e "  [${YELLOW}03${NC}] Gestión de Cuentas Hysteria (UDP)"
   echo -e "  [${YELLOW}04${NC}] Gestión de Cuentas Hysteria 2 (UDP)"
   echo -e "  [${YELLOW}05${NC}] ZiVPN Account Management (UDP)"
-  echo -e "  [${YELLOW}05${NC}] Monitorear Conexiones Activas"
-  echo -e "  [${YELLOW}06${NC}] Control de Servicios (Reiniciar Protocolos)"
-  echo -e "  [${YELLOW}07${NC}] Respaldar y Restaurar Datos"
-  echo -e "  [${YELLOW}08${NC}] Utilidades del Sistema (BBR y Netflix)"
-  echo -e "  [${YELLOW}09${NC}] Configuración Avanzada (Dominio / Nameserver)"
-  echo -e "  [${YELLOW}10${NC}] Reiniciar Servidor"
+  echo -e "  [${YELLOW}06${NC}] Monitorear Conexiones Activas"
+  echo -e "  [${YELLOW}07${NC}] Control de Servicios (Reiniciar Protocolos)"
+  echo -e "  [${YELLOW}08${NC}] Respaldar y Restaurar Datos"
+  echo -e "  [${YELLOW}09${NC}] Utilidades del Sistema (BBR y Netflix)"
+  echo -e "  [${YELLOW}10${NC}] Configuración Avanzada (Dominio / Nameserver)"
+  echo -e "  [${YELLOW}11${NC}] Reiniciar Servidor"
   echo -e "  [${RED}00${NC}] Salir\n"
   read -rp "  ► Selecciona una opción: " opt
   case "$opt" in
