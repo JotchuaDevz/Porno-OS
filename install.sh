@@ -1030,6 +1030,31 @@ sed -i "s|SSHPORT1|$SSH_Port1|g" /etc/deekayvpn/service_checker.sh
 sed -i "s|SSHPORT2|$SSH_Port2|g" /etc/deekayvpn/service_checker.sh
 
 echo "*/3 * * * * root /bin/bash /etc/deekayvpn/service_checker.sh >/dev/null 2>&1" > /etc/cron.d/service-checker
+
+mkdir -p /etc/deekayvpn 2>/dev/null
+touch /etc/deekayvpn/ssh_limits.txt
+cat <<'SSHLimitChecker' > /etc/deekayvpn/ssh_limit_checker.sh
+#!/bin/bash
+DB="/etc/deekayvpn/ssh_limits.txt"
+[ -s "$DB" ] || exit 0
+while read -r suser slimit; do
+  [ -z "$suser" ] && continue
+  [[ "$slimit" =~ ^[0-9]+$ ]] || continue
+  [ "$slimit" -le 0 ] && continue
+  id "$suser" >/dev/null 2>&1 || continue
+  mapfile -t sessions < <(ps -u "$suser" -o pid=,etimes=,cmd= 2>/dev/null | awk '$0 ~ /sshd/ {print $1" "$2}')
+  count=${#sessions[@]}
+  [ "$count" -le "$slimit" ] && continue
+  excess=$((count - slimit))
+  mapfile -t sorted < <(printf '%s\n' "${sessions[@]}" | sort -k2,2n)
+  for ((i=0; i<excess; i++)); do
+    pid=$(awk '{print $1}' <<< "${sorted[$i]}")
+    [ -n "$pid" ] && kill -9 "$pid" 2>/dev/null
+  done
+done < "$DB"
+SSHLimitChecker
+chmod 755 /etc/deekayvpn/ssh_limit_checker.sh
+echo "* * * * * root /bin/bash /etc/deekayvpn/ssh_limit_checker.sh >/dev/null 2>&1" > /etc/cron.d/ssh-limit-checker
 rm -f /etc/logrotate.d/rsyslog
 cat <<'logrotate' > /etc/logrotate.d/rsyslog
 /var/log/syslog /var/log/kern.log /var/log/auth.log /var/log/xray/access.log /var/log/xray/error.log { rotate 7; daily; missingok; notifempty; compress; delaycompress; sharedscripts; postrotate; /usr/lib/rsyslog/rsyslog-rotate; endscript; }
@@ -1664,6 +1689,9 @@ HYST2_PORT="${HYST2_PORT:-36713}"
 touch "$HYST2_USER_DB" 2>/dev/null || true
 ZIVPN_CONFIG="/etc/zivpn/config.json"
 ZIVPN_USER_DB="/etc/zivpn/users.txt"
+SSH_LIMIT_DB="/etc/deekayvpn/ssh_limits.txt"
+mkdir -p /etc/deekayvpn 2>/dev/null || true
+touch "$SSH_LIMIT_DB" 2>/dev/null || true
 
 # --- Utility Functions ---
 server_ip() { curl -4 -s --max-time 2 ipv4.icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}'; }
@@ -2283,14 +2311,62 @@ create_user() {
   echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
   echo -e "                   ${BOLD}CREAR NUEVO USUARIO SSH${NC}"
   echo -e "${CYAN}══════════════════════════════════════════════════════════════${NC}"
-  read -rp "  Nombre de usuario: " user
-  read -rp "  Contraseña: " pass
-  read -rp "  Válido por (días): " days
+  echo -e "  ${YELLOW}(Escribe 00 en cualquier campo para cancelar y volver)${NC}\n"
 
-  if [ -z "$user" ] || [ -z "$pass" ] || [ -z "$days" ]; then echo -e "\n${RED}  Error: Todos los campos son obligatorios.${NC}"; pause_return; return; fi
-  if id "$user" >/dev/null 2>&1; then echo -e "\n${RED}  Error: El usuario '$user' ya existe.${NC}"; pause_return; return; fi
+  while true; do
+    read -rp "  Nombre de usuario: " user
+    user="$(echo -n "$user" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [ "$user" = "00" ] && return
+    if [ -z "$user" ]; then echo -e "${RED}  Error: El usuario no puede estar vacío.${NC}\n"; continue; fi
+    if ! [[ "$user" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then echo -e "${RED}  Error: Nombre inválido (minúsculas/números/guiones, sin espacios).${NC}\n"; continue; fi
+    if id "$user" >/dev/null 2>&1; then echo -e "${RED}  Error: El usuario '$user' ya existe.${NC}\n"; continue; fi
+    break
+  done
 
-  useradd -e "$(date -d "+$days days" +%Y-%m-%d)" -s /bin/false -M "$user" && echo "$user:$pass" | chpasswd
+  while true; do
+    read -rp "  Contraseña: " pass
+    pass="$(echo -n "$pass" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [ "$pass" = "00" ] && return
+    if [ -z "$pass" ]; then echo -e "${RED}  Error: La contraseña no puede estar vacía.${NC}\n"; continue; fi
+    if [[ "$pass" =~ [[:space:]] ]]; then echo -e "${RED}  Error: La contraseña no puede contener espacios.${NC}\n"; continue; fi
+    break
+  done
+
+  while true; do
+    read -rp "  Válido por (días): " days
+    days="$(echo -n "$days" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [ "$days" = "00" ] && return
+    if ! [[ "$days" =~ ^[0-9]+$ ]] || [ "$days" -eq 0 ]; then echo -e "${RED}  Error: Debe ser un número de días mayor a 0.${NC}\n"; continue; fi
+    break
+  done
+
+  while true; do
+    read -rp "  Límite de conexiones simultáneas (0 = sin límite): " conn_limit
+    conn_limit="$(echo -n "$conn_limit" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [ "$conn_limit" = "00" ] && return
+    [ -z "$conn_limit" ] && conn_limit=0
+    if ! [[ "$conn_limit" =~ ^[0-9]+$ ]]; then echo -e "${RED}  Error: Debe ser un número.${NC}\n"; continue; fi
+    break
+  done
+
+  ua_err=$(useradd -e "$(date -d "+$days days" +%Y-%m-%d)" -s /bin/false -M "$user" 2>&1 1>/dev/null)
+  if [ $? -ne 0 ]; then
+    echo -e "\n${RED}  Error: No se pudo crear el usuario '$user'.${NC}"
+    echo -e "  ${YELLOW}Detalle:${NC} ${ua_err:-desconocido}"
+    echo "$(date '+%F %T') create_user FALLÓ useradd user=$user :: ${ua_err:-desconocido}" >> /var/log/deekayvpn-menu-errors.log
+    pause_return; return
+  fi
+  cp_err=$(echo "$user:$pass" | chpasswd 2>&1 1>/dev/null)
+  if [ $? -ne 0 ]; then
+    echo -e "\n${RED}  Error: No se pudo establecer la contraseña. Eliminando cuenta incompleta...${NC}"
+    echo -e "  ${YELLOW}Detalle:${NC} ${cp_err:-desconocido}"
+    echo "$(date '+%F %T') create_user FALLÓ chpasswd user=$user :: ${cp_err:-desconocido}" >> /var/log/deekayvpn-menu-errors.log
+    userdel -f "$user" 2>/dev/null
+    pause_return; return
+  fi
+
+  sed -i "/^$user /d" "$SSH_LIMIT_DB" 2>/dev/null
+  if [ "$conn_limit" -gt 0 ]; then echo "$user $conn_limit" >> "$SSH_LIMIT_DB"; fi
 
   IP=$(curl -s ipv4.icanhazip.com)
   CURRENT_NS=$(grep 'ExecStart=' /etc/systemd/system/server-sldns.service 2>/dev/null | sed 's/.*server\.key \([^ ]*\) .*/\1/')
@@ -2304,6 +2380,7 @@ create_user() {
   echo -e "  ${BOLD}Usuario${NC}   : ${YELLOW}$user${NC}"
   echo -e "  ${BOLD}Contraseña${NC}   : ${YELLOW}$pass${NC}"
   echo -e "  ${BOLD}Expiración${NC}     : ${YELLOW}$(date -d "+$days days" +%Y-%m-%d)${NC}"
+  echo -e "  ${BOLD}Límite Conexiones${NC}: ${YELLOW}$([ "$conn_limit" -gt 0 ] && echo "$conn_limit" || echo "Sin límite")${NC}"
   echo -e "${CYAN}--------------------------------------------------------------${NC}"
   echo -e "  SSH Port   : 22, 299"
   echo -e "  SSL/TLS    : 443"
@@ -2336,6 +2413,7 @@ delete_user() {
     
     # Execute forced deletion
     if userdel -r -f "$SELECTED_USER" 2>/dev/null || userdel -f "$SELECTED_USER" 2>/dev/null; then
+        sed -i "/^$SELECTED_USER /d" "$SSH_LIMIT_DB" 2>/dev/null
         echo -e "${GREEN}El usuario $SELECTED_USER ha sido eliminado.${NC}"
     else
         echo -e "${RED}Fallo al eliminar $SELECTED_USER. Revisa archivos bloqueados.${NC}"
