@@ -71,19 +71,16 @@ mostrar_banner_instalador() {
     echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}"
 }
 
-echo "${CYAN}$============================================================${NC}"
+echo "${CYAN}============================================================${NC}"
 echo -e "${GREEN}              Instalador de Script SSH Hex Auto${NC}"
 echo -e "${CYAN}        (AutoScript: SSH/Xray/Hysteria/ZiVPN/UDP Custom)${NC}"
-echo "${CYAN}$============================================================${NC}"
-echo ""
+echo "${CYAN}============================================================${NC}"
 echo -e "${CYAN}Sistemas Operativos Soportados:${NC}"
-echo ""
 echo -e "${GREEN}  ✔ Debian 12              (Recomendado)${NC}"
 echo -e "${GREEN}  ✔ Debian 11              (Soporte Legado)${NC}"
 echo -e "${GREEN}  ✔ Ubuntu 24.04           (Soportado)${NC}"
 echo -e "${GREEN}  ✔ Ubuntu 22.04           (Recomendado)${NC}"
 echo -e "${GREEN}  ✔ Ubuntu 20.04           (Soporte Legado)${NC}"
-echo ""
 echo -e "${CYAN}============================================================${NC}"
 sleep 5
 
@@ -344,8 +341,6 @@ fi
 if ! systemctl list-unit-files | grep -q "^${SQUID_SERVICE}\.service"; then
   if systemctl list-unit-files | grep -q "^squid3\.service"; then SQUID_SERVICE="squid3"; fi
 fi
-
-apt-get update -y >/dev/null 2>&1
 
 PACKAGE_LIST=(
   neofetch sslh dnsutils stunnel4 squid nano sudo wget unzip tar zip gzip
