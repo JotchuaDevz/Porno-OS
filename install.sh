@@ -71,10 +71,10 @@ mostrar_banner_instalador() {
     echo -e "${BLUE}══════════════════════════════════════════════════════════════${NC}"
 }
 
-echo "${CYAN}============================================================${NC}"
+echo -e "${CYAN}============================================================${NC}"
 echo -e "${GREEN}              Instalador de Script SSH Hex Auto${NC}"
 echo -e "${CYAN}        (AutoScript: SSH/Xray/Hysteria/ZiVPN/UDP Custom)${NC}"
-echo "${CYAN}============================================================${NC}"
+echo -e "${CYAN}============================================================${NC}"
 echo -e "${CYAN}Sistemas Operativos Soportados:${NC}"
 echo -e "${GREEN}  ✔ Debian 12              (Recomendado)${NC}"
 echo -e "${GREEN}  ✔ Debian 11              (Soporte Legado)${NC}"
