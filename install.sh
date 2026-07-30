@@ -317,7 +317,7 @@ IPADDR="$(ip_address)"
 mostrar_banner_instalador
 
 actualizar_sistema() {
-    apt-get update -y > /dev/null 2>&1 && apt-get upgrade -y --with-new-pkgs > /dev/null 2>&1
+    apt-get update -y > /dev/null 2>&1
 }
 step "Actualizando (Apt Update)..." actualizar_sistema
 
