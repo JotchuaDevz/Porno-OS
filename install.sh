@@ -386,7 +386,7 @@ echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-
 
 FAILED_PACKAGES=()
 for pkg in "${AVAILABLE_PACKAGES[@]}"; do
-    if ! step "Instalando: ${pkg}" apt-get install -y -qq "$pkg" > /dev/null 2>&1; then
+    if ! step "Instalando: ${pkg}" apt-get install -y -qq "$pkg"; then
         FAILED_PACKAGES+=("$pkg")
     fi
 done
