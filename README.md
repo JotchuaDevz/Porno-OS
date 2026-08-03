@@ -1,6 +1,6 @@
 # Instructivo: Hex Tunnel Script (VPS AutoScript)
 
-Script desarrollado y mantenido por JotchuaDevz. Instala y configura un servidor multiprotocolo completo (SSH, Xray, Hysteria, ZiVPN, UDP Custom, SlowDNS, SlipStream) sobre un VPS limpio, con panel de administración por menú.
+Script desarrollado y mantenido por JotchuaDevz. Instala y configura un servidor multiprotocolo completo (SSH, Xray, Hysteria, ZiVPN, UDP Custom, SlowDNS) sobre un VPS limpio, con panel de administración por menú.
 
 Repositorio: https://github.com/JotchuaDevz/Porno-OS
 
@@ -17,6 +17,10 @@ Repositorio: https://github.com/JotchuaDevz/Porno-OS
   - Ubuntu 24.04 (soportado)
   - Ubuntu 22.04 (recomendado)
   - Ubuntu 20.04 (soporte legado)
+ 
+  ### Arquitecturas
+  - ARM64 (AARCH64)
+  - x86_64 (AMD64)
 
 Cualquier otro sistema operativo o versión no es compatible y el instalador se detendrá al detectarlo.
 
@@ -51,9 +55,6 @@ SlipStream es un túnel DNS adicional. Si se activa durante la instalación, req
 ss.tudominio.com          NS    ss-server.tudominio.com
 ss-server.tudominio.com   A     123.45.67.89
 ```
-
-El script no permite usar el mismo dominio para SlowDNS y SlipStream, ya que el enrutador interno (dnsdist) distribuye el tráfico según el dominio de destino. Si ambos coinciden, uno de los dos túneles se queda sin tráfico.
-
 ---
 
 ## 2. Instalación
@@ -63,29 +64,8 @@ Existen cuatro métodos equivalentes para ejecutar el instalador. Se recomienda 
 ### Opcion 1
 
 ```
-wget -qO- https://raw.githubusercontent.com/JotchuaDevz/Porno-OS/refs/heads/main/install.sh | bash
+sudo apt update -y; apt upgrade -y; wget -qO install.sh https://raw.githubusercontent.com/JotchuaDevz/Porno-OS/refs/heads/main/install.sh; chmod +x install.sh; ./install.sh
 ```
-
-### Opcion 2
-
-```
-wget -qO xfc.sh https://raw.githubusercontent.com/JotchuaDevz/Porno-OS/refs/heads/main/install.sh && bash install.sh
-```
-
-### Opcion 3
-
-```
-bash <(curl -sL https://raw.githubusercontent.com/JotchuaDevz/Porno-OS/refs/heads/main/install.sh)
-```
-
-### Opcion 4 (recomendada)
-
-```
-wget -qO install.sh https://raw.githubusercontent.com/JotchuaDevz/Porno-OS/refs/heads/main/install.sh
-chmod +x install.sh
-./install.sh
-```
-
 ---
 
 ## 3. Flujo de instalación (qué preguntas hace el script)
@@ -95,9 +75,8 @@ chmod +x install.sh
 3. Si se ingresó un dominio, verifica que resuelva correctamente a la IP del servidor antes de continuar. Si no coincide, la instalación se detiene con un mensaje de error indicando que se debe corregir el registro A.
 4. Solicita el certificado: automático vía Let's Encrypt si hay dominio válido, o autofirmado si se usa IP.
 5. Solicita el nameserver para SlowDNS (ver sección 1.3). Trae un valor por defecto de ejemplo que debe reemplazarse por uno propio.
-6. Pregunta si se desea instalar SlipStream. Si se acepta, solicita su propio subdominio NS (ver sección 1.4).
-7. Solicita el valor de ofuscación (obfs) para Hysteria y ZiVPN, con un valor por defecto sugerido.
-8. Instala y configura automáticamente:
+6. Solicita el valor de ofuscación (obfs) para Hysteria y ZiVPN, con un valor por defecto sugerido.
+7. Instala y configura automáticamente:
    - SSH con Dropbear, Stunnel y SSLH
    - Xray-core con los inbounds de VLESS, VMess y Trojan
    - HAProxy para enrutamiento TLS y HTTP/2
@@ -107,7 +86,7 @@ chmod +x install.sh
    - SlowDNS y, si se activó, SlipStream
    - Cronjobs de expiración de cuentas para cada protocolo
    - Verificador de servicios y limitador de sesiones SSH
-9. Al finalizar, reinicia el servidor automáticamente para aplicar todos los cambios.
+8. Al finalizar, reinicia el servidor automáticamente para aplicar todos los cambios.
 
 ---
 
@@ -116,17 +95,17 @@ chmod +x install.sh
 | Servicio | Puerto(s) |
 |---|---|
 | SSH (directo) | 22 |
-| SSH (segundo puerto interno) | 299 |
-| Stunnel (SSL sobre SSH) | 4443 |
+| SSH (segundo puerto) | 299 |
+| Stunnel (SSL) | 4443 |
 | SSLH (multiplexor) | 666 (interno) |
 | WebSocket Proxy | 10080, 25, 2082, 2086 |
 | Xray (VLESS/VMess/Trojan TLS) | 443 |
-| Xray (variantes sin TLS) | 80, 8080, 8880 |
+| Xray (No TLS) | 80, 8080, 8880 |
 | Hysteria (v1) | 36712/udp |
 | Hysteria 2 | 36713/udp |
 | UDP Custom | 36717/udp |
 | ZiVPN | 5667 |
-| Panel web interno (Nginx) | 85 |
+| Nginx | 85 |
 
 Xray incluye variantes de VLESS, VMess y Trojan sobre TCP, WebSocket, gRPC, XHTTP y HTTPUpgrade, con y sin TLS, enrutadas mediante HAProxy según el path o el ALPN de la conexión.
 
@@ -146,7 +125,6 @@ Desde ahí se pueden realizar, entre otras, las siguientes acciones:
 - Obtener los enlaces de conexión (vmess://, vless://, trojan://, etc.) listos para importar en el cliente
 - Cambiar el dominio o IP del servidor
 - Cambiar el nameserver de SlowDNS
-- Instalar o cambiar el dominio de SlipStream
 - Iniciar, detener o reiniciar servicios individuales
 - Acceder a herramientas de configuración avanzada
 
@@ -163,3 +141,8 @@ Desde ahí se pueden realizar, entre otras, las siguientes acciones:
 ## 7. Soporte
 
 Canal de Telegram: https://t.me/RequestLab_X_Canal
+--
+Creador : https://t.me/Jotchua_DevzZ
+--
+Bot Generador De Keys : https://t.me/hexgenjt_bot
+--
