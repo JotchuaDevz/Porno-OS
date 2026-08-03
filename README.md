@@ -1,4 +1,4 @@
-# Instructivo: Hex Tunnel Script (VPS AutoScript)
+# Instructivo: Hex Auto Script (VPS AutoScript)
 
 Script desarrollado y mantenido por JotchuaDevz. Instala y configura un servidor multiprotocolo completo (SSH, Xray, Hysteria, ZiVPN, UDP Custom, SlowDNS) sobre un VPS limpio, con panel de administración por menú.
 
@@ -46,15 +46,6 @@ ns-server.tudominio.com   A     123.45.67.89
 El valor que se ingresa en el script cuando pregunta "Ingresa el Nameserver de SlowDNS" es el registro delegado, en este ejemplo `ns.tudominio.com`.
 
 Si no se configura este registro correctamente, SlowDNS no recibirá tráfico aunque el servicio esté instalado y corriendo.
-
-### 1.4 Subdominio NS para SlipStream (opcional)
-
-SlipStream es un túnel DNS adicional. Si se activa durante la instalación, requiere su propio subdominio con delegación NS, siguiendo el mismo esquema del punto 1.3, pero con un nombre distinto al usado para SlowDNS. Ejemplo:
-
-```
-ss.tudominio.com          NS    ss-server.tudominio.com
-ss-server.tudominio.com   A     123.45.67.89
-```
 ---
 
 ## 2. Instalación
